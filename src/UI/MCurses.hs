@@ -12,5 +12,7 @@ data MEnv = MEnv
 
 
 type MCurses m a = (Monad m, MonadState MEnv m) => m a
-x :: MonadState MEnv m => m Int
+
+x :: MCurses m Int
 x = menv_x <$> get
+
