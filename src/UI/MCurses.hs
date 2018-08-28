@@ -51,7 +51,7 @@ data CursesEnv = CursesEnv
     , ce_npairs       :: Int
     , ce_colormap     :: [((Color, Color), Int)]
     , ce_hw           :: (Int, Int)
-    , ce_dimensions   :: Map Window (Dimension, Dimension, Dimension, Dimension)
+    , ce_dimensions   :: Map Window Props
     , ce_iptr         :: Ptr CInt
     , ce_mptr         :: Ptr MEVENT
     } 
@@ -156,10 +156,10 @@ render = void $ MC $ io $ do
     c_update_panels
     c_doupdate
 
-newWindowUnder :: MonadIO m => Window -> Dimension -> Dimension -> Dimension 
-                               -> Dimension -> MC m Window
+newWindowUnder :: MonadIO m => Window -> Prop -> Prop -> Prop 
+                               -> Prop -> MC m Window
 newWindowUnder parent hd wd yd xd = do
-    f <- calcDimensionF parent
+    f <- calcPropF parent
     win <- io $ do winp <- c_newwin (f hd False) (f wd True) 
                                     (f yd False) (f xd True)
                    panp <- c_new_panel winp
@@ -171,14 +171,14 @@ newWindowUnder parent hd wd yd xd = do
                          , ce_zorder = win : ce_zorder e })
     return win
 
-newWindow :: MonadIO m => Dimension -> Dimension -> Dimension -> Dimension 
+newWindow :: MonadIO m => Prop -> Prop -> Prop -> Prop 
                                     -> MC m Window
 newWindow = newWindowUnder stdWindow
 
-newRegion :: MonadIO m => Window -> Dimension -> Dimension -> Dimension 
-                                 -> Dimension -> MC m Window
+newRegion :: MonadIO m => Window -> Prop -> Prop -> Prop 
+                                 -> Prop -> MC m Window
 newRegion parent hd wd yd xd = do
-    f <- calcDimensionF parent
+    f <- calcPropF parent
     win <- io $ do pwinp <- win_wptr parent
                    winp <- c_subwin pwinp (f hd False) (f wd True)
                                           (f yd False) (f xd True)
@@ -265,60 +265,60 @@ underdeg :: Eq a => a -> Tree a -> (Forest a -> (b, Forest a)) -> (Maybe b, Tree
 underdeg win tree f = deg win tree (\t -> (\fo -> Just t { subForest = fo })
                       <$> (f $ subForest t))
 
-parentTree :: Monad m => Window -> MC m (Maybe WinTree)
-parentTree win = ptree . ce_tree <$> getEnv
+winTree :: Monad m => Window -> MC m (Maybe WinTree)
+winTree win = ptree . ce_tree <$> getEnv
     where
-    ptree n @ (Node w ws) | win `L.elem` (rootLabel <$> ws)  = Just n
+    ptree n @ (Node w ws) | win == w  = Just n
+                          | otherwise = L.foldl step Nothing ws
+    step (Just t) _ = Just t
+    step Nothing f = ptree f
+
+parentTree :: Monad m => Window -> MC m (Maybe WinTree)
+parentTree win | win == stdWindow = Just . Node stdWindow . (:[]) . ce_tree 
+                                            <$> getEnv
+               | otherwise        = ptree . ce_tree <$> getEnv
+    where
+    ptree n @ (Node _ ws) | win `L.elem` (rootLabel <$> ws)  = Just n
                           | otherwise = L.foldl step Nothing ws 
     step (Just t) _ = Just t
     step Nothing f = ptree f
-parentWin :: MonadIO m => Window -> MC m (Maybe Window)
-parentWin win = do
-    if win == stdWindow then
-        return Nothing
-    else do
-        s <- getEnv
-        return (go $ ce_tree s)
-    where
-    go (T.Node x ys) = 
-        if win `elem` (T.rootLabel <$> ys) then 
-            Just x 
-        else 
-            join $ listToMaybe (go <$> ys)
+
+parentWin :: Monad m => Window -> MC m (Maybe Window)
+parentWin win = fmap rootLabel <$> parentTree win
 
 childrenWins :: MonadIO m => Window -> MC m (T.Forest Window)
 childrenWins win = maybe mempty id `liftM` underWindow (\x -> (x, x)) win
 
-parentWin_ :: MonadIO m => Window -> MC m Window
+parentWin_ :: Monad m => Window -> MC m Window
 parentWin_ w = maybe stdWindow id <$> parentWin w 
 
-screenDimensions :: MonadIO m => MC m (Int, Int, Int, Int)
-screenDimensions = do
+screenProps :: MonadIO m => MC m (Int, Int, Int, Int)
+screenProps = do
     (h, w) <- ce_hw <$> getEnv
     return (h, w, 0, 0)
 
-calcDimensionF :: MonadIO m => Window -> MC m (Dimension -> Bool -> Int)
-calcDimensionF pwin = io $ do
+calcPropF :: MonadIO m => Window -> MC m (Prop -> Bool -> Int)
+calcPropF pwin = io $ do
     win <- win_wptr pwin
     y0 <- c_getbegy win
     x0 <- c_getbegx win
     y1 <- c_getmaxy win
     x1 <- c_getmaxx win
-    return $ calcDimensionFromAbs (y1 - y0, x1 - x0, y0, x0)
+    return $ calcPropFromAbs (y1 - y0, x1 - x0, y0, x0)
 
-calcDimensionFromAbs :: Absolutes -> Dimension -> Bool -> Int
-calcDimensionFromAbs (h, w, _, _) d horz =
-        let n = calcDimension h w d
+calcPropFromAbs :: Dimensions -> Prop -> Bool -> Int
+calcPropFromAbs (h, w, _, _) d horz =
+        let n = calcProp h w d
         in if horz then max 0 $ min w n else max 0 $ min h n 
 
-calcDimensionsF :: MonadIO m => Window -> MC m (Dimensions -> Absolutes)
-calcDimensionsF parent = do
+calcPropsF :: MonadIO m => Window -> MC m (Props -> Dimensions)
+calcPropsF parent = do
     abss <- windowDimensions parent
-    return (calcDimensionsFromAbs abss)
+    return (calcPropsFromAbs abss)
 
-calcDimensionsFromAbs :: Absolutes -> Dimensions -> Absolutes
-calcDimensionsFromAbs abss @ (ph, pw, py, px) (hd, wd, yd, xd) =
-    let f = calcDimensionFromAbs abss
+calcPropsFromAbs :: Dimensions -> Props -> Dimensions
+calcPropsFromAbs abss @ (ph, pw, py, px) (hd, wd, yd, xd) =
+    let f = calcPropFromAbs abss
         (h, w, y, x) = (f hd False, f wd True, f yd False, f xd True)
     in (h, w, py + if y + h > ph then ph - h else y
             , px + if x + w > pw then pw - w else x)
@@ -332,7 +332,7 @@ drawBorder win = io $ do
     winp <- win_wptr win
     void $ c_wborder winp 0 0 0 0 0 0 0 0
 
-moveWindow :: MonadIO m => Window -> Dimension -> Dimension -> MC m ()
+moveWindow :: MonadIO m => Window -> Prop -> Prop -> MC m ()
 moveWindow win ydim xdim = do
     parent <- maybe stdWindow id <$> parentWin win
     (ph, pw, py, px) <- windowDimensions parent
@@ -345,24 +345,64 @@ moveWindow win ydim xdim = do
         Left wptr -> DRCCALL("mvwin", c_mvwin wptr y x)
         Right pptr -> DRCCALL("move_panel", c_move_panel pptr y x)
 
-resizeWindow :: MonadIO m => Window -> Dimension -> Dimension -> MC m ()
+resizeWindow :: MonadIO m => Window -> Prop -> Prop -> MC m ()
 resizeWindow win h w = MC $ do
     return $ undefined win h w
 
-adjustSize :: MonadIO m => (Dimensions -> Absolutes) -> Window -> MC m Absolutes
+recalcWin :: MonadIO m => Window -> MC m ()
+recalcWin win | win == stdWindow  = undefined
+              | otherwise         = parentTree win >>= mapM_ undefined
+
+io_movewindow :: Window -> Int -> Int -> IO ()
+io_movewindow w y x = case win_pointer w of
+    Left wptr -> DRCCALL("mvwin", c_mvwin wptr y x)
+    Right pptr -> DRCCALL("move_panel", c_move_panel pptr y x)
+
+readjustWin :: MonadIO m => Window -> MC m ()
+readjustWin top = do mnode <- parentTree top
+                     forM_ mnode $ \(Node w ws) -> do
+                         f <- calcPropsF w 
+                         rtree f `mapM_` (L.find ((== top) . rootLabel) ws)
+    where 
+    rtree f (Node win ws) = do
+        (h,  w,  y,  x) <- windowDimensions win
+        ndims @ (nh, nw, ny, nx) <- f <$> windowProps win
+
+        when (y /= ny || x /= nx) $ io $ do
+            io_movewindow win ny nx
+
+        when (h /= nh || w /= nw) $ io $ do
+            ptr <- win_wptr win
+            DRCCALL("wresize", c_wresize ptr nw nh)
+                
+        forM_ ws (rtree (calcPropsFromAbs ndims))
+
+
+adjustSize :: MonadIO m => (Props -> Dimensions) -> Window -> MC m Dimensions
 adjustSize f win = MC $ get >>= \cenv -> io $ do
     let dims = maybe (Height, Width, 0, 0) id 
                      (M.lookup win (ce_dimensions cenv))
     return (f dims)
 
-windowDimensions :: MonadIO m => Window -> MC m (Int, Int, Int, Int)
-windowDimensions win
-  | win == stdWindow = screenDimensions
-  | otherwise = do
-        f <- calcDimensionsF =<< parentWin_ win
-        dimmap <- ce_dimensions <$> getEnv
-        let dims = maybe (Height, Width, 0, 0) id $ M.lookup win dimmap
-        return (f dims)
+windowProps :: MonadIO m => Window -> MC m Props
+windowProps w = do pmap <- ce_dimensions <$> getEnv
+                   return (maybe (Height, Width, 0, 0) id (M.lookup w pmap))
+
+windowDimensions :: MonadIO m => Window -> MC m Dimensions
+windowDimensions win = io $ do p <- win_wptr win 
+                               y0 <- c_getbegy p
+                               x0 <- c_getbegx p
+                               y1 <- c_getmaxy p
+                               x1 <- c_getmaxx p
+                               return (y1 - y0, x1 - x0, y0, x0)
+-- windowDimensions :: MonadIO m => Window -> MC m Dimensions
+-- windowDimensions win
+--   | win == stdWindow = screenProps
+--   | otherwise = do
+--         f <- calcPropsF =<< parentWin_ win
+--         dimmap <- ce_dimensions <$> getEnv
+--         let dims = maybe (Height, Width, 0, 0) id $ M.lookup win dimmap
+--         return (f dims)
 
 getInput :: MonadIO m => Maybe Int -> MC m (Maybe Input)
 getInput mdelay = MC $ get >>= \cenv -> io $ do
