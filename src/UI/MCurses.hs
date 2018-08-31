@@ -37,6 +37,7 @@ import Foreign.C
 
 import System.IO
 import System.Posix.Signals
+import System.Posix.Signals.Exts
 
 import UI.MCurses.Internal
 #ifdef DEBUG
@@ -159,10 +160,10 @@ render = void $ MC $ io $ do
 newWindowUnder :: MonadIO m => Window -> Prop -> Prop -> Prop 
                                -> Prop -> MC m Window
 newWindowUnder parent hd wd yd xd = do
-    f <- calcPropF parent
-    win <- io $ do winp <- c_newwin (f hd False) (f wd True) 
-                                    (f yd False) (f xd True)
-                   panp <- c_new_panel winp
+    f <- calcPropsF parent
+    let (h, w, y, d) = f (hd, wd, yd, xd)
+    win <- io $ do winp <- DCALL(c_newwin h w y d)
+                   panp <- DCALL(c_new_panel winp)
                    c_keypad winp True
                    return (Window (Right panp))
     underWindow_ (pure win :) parent
@@ -333,21 +334,14 @@ drawBorder win = io $ do
     void $ c_wborder winp 0 0 0 0 0 0 0 0
 
 moveWindow :: MonadIO m => Window -> Prop -> Prop -> MC m ()
-moveWindow win ydim xdim = do
-    parent <- maybe stdWindow id <$> parentWin win
-    (ph, pw, py, px) <- windowDimensions parent
-    MC $ modify' $ \cenv @ CursesEnv { ce_dimensions = cedims } -> 
-        cenv { ce_dimensions = 
-                  M.adjust (\(ceH, ceW, _, _) -> (ceH, ceW, ydim, xdim)) 
-                           win cedims }
-    (_, _, y, x) <- windowDimensions win
-    io $ case win_pointer win of
-        Left wptr -> DRCCALL("mvwin", c_mvwin wptr y x)
-        Right pptr -> DRCCALL("move_panel", c_move_panel pptr y x)
+moveWindow win yp xp = do
+    adjustProps win (\(h, w, _, _) -> (h, w, yp, xp))
+    readjustWin win
 
 resizeWindow :: MonadIO m => Window -> Prop -> Prop -> MC m ()
-resizeWindow win h w = MC $ do
-    return $ undefined win h w
+resizeWindow win h w = do
+    adjustProps win (\(_, _, y, x) -> (h, w, y, x))
+    readjustWin win
 
 recalcWin :: MonadIO m => Window -> MC m ()
 recalcWin win | win == stdWindow  = undefined
@@ -358,6 +352,10 @@ io_movewindow w y x = case win_pointer w of
     Left wptr -> DRCCALL("mvwin", c_mvwin wptr y x)
     Right pptr -> DRCCALL("move_panel", c_move_panel pptr y x)
 
+adjustProps :: Monad m => Window -> (Props -> Props) -> MC m ()
+adjustProps w f = MC $ modify' $ 
+        \e -> e { ce_dimensions = M.adjust f w (ce_dimensions e) }
+
 readjustWin :: MonadIO m => Window -> MC m ()
 readjustWin top = do mnode <- parentTree top
                      forM_ mnode $ \(Node w ws) -> do
@@ -367,7 +365,6 @@ readjustWin top = do mnode <- parentTree top
     rtree f (Node win ws) = do
         (h,  w,  y,  x) <- windowDimensions win
         ndims @ (nh, nw, ny, nx) <- f <$> windowProps win
-
         when (y /= ny || x /= nx) $ io $ do
             io_movewindow win ny nx
 
@@ -390,38 +387,38 @@ windowProps w = do pmap <- ce_dimensions <$> getEnv
 
 windowDimensions :: MonadIO m => Window -> MC m Dimensions
 windowDimensions win = io $ do p <- win_wptr win 
-                               y0 <- c_getbegy p
-                               x0 <- c_getbegx p
-                               y1 <- c_getmaxy p
-                               x1 <- c_getmaxx p
-                               return (y1 - y0, x1 - x0, y0, x0)
--- windowDimensions :: MonadIO m => Window -> MC m Dimensions
--- windowDimensions win
---   | win == stdWindow = screenProps
---   | otherwise = do
---         f <- calcPropsF =<< parentWin_ win
---         dimmap <- ce_dimensions <$> getEnv
---         let dims = maybe (Height, Width, 0, 0) id $ M.lookup win dimmap
---         return (f dims)
+                               liftM4 (,,,) (c_getmaxy p) (c_getmaxx p)
+                                            (c_getbegy p) (c_getbegx p)
+
+getFocus :: Monad m => MC m Window
+getFocus = maybe stdWindow fst . L.uncons . ce_zorder <$> getEnv
 
 getInput :: MonadIO m => Maybe Int -> MC m (Maybe Input)
-getInput mdelay = MC $ get >>= \cenv -> io $ do
-    wptr <- win_wptr (L.head $ ce_zorder cenv)
-    DCALL(c_wtimeout wptr (maybe (-1) id mdelay)) 
-    rc <- c_wget_wch wptr (ce_iptr cenv)
-    if rc == c_ERR then
-        return Nothing
-    else do
-        code <- fi <$> peek (ce_iptr cenv)
-        liftM Just $ 
-            if code == c_KEY_MOUSE then
-                parseMouse (ce_mptr cenv)
-            else if code == c_KEY_RESIZE then
-                return ScreenResized
-            else if rc == 0 then
-                parseChar code 
+getInput mdelay = do
+    prev <- if isNothing mdelay then
+                getInput (Just 0)
             else
-                parseKey code
+                return Nothing
+    if not (isNothing prev) then
+        return prev
+    else MC $ get >>= \cenv -> io $ do
+        wptr <- win_wptr (maybe stdWindow fst $ L.uncons (ce_zorder cenv))
+        DCALL(c_wtimeout wptr (maybe (-1) id mdelay)) 
+        rc <- DCALL(c_wget_wch wptr (ce_iptr cenv))
+        code <- fi <$> peek (ce_iptr cenv)
+        PUTS("rc, code = " ++ show (rc, code))
+        if rc == c_ERR then
+            return Nothing
+        else do
+            liftM Just $ 
+                if rc == 0 then
+                    parseChar code 
+                else if code == c_KEY_MOUSE then
+                    parseMouse (ce_mptr cenv)
+                else if code == c_KEY_RESIZE then
+                    return ScreenResized
+                else
+                    parseKey code
     where
     parseKey :: Int -> IO Input
     parseKey code = return (KeyPress code)
@@ -449,10 +446,10 @@ test1 = do
     drawBorder win 
     render
     getInput (Just 500)
-    moveWindow win 4 0
+    moveWindow win 4 8
     render
     getInput (Just 500)
-    moveWindow win 5 8
+    moveWindow win 5 (Width/2)
     render
     waitInput
 
@@ -465,6 +462,15 @@ testResize = do
     moveWindow win 3 3
     render
     waitInput
+
+testEvs :: MC IO ()
+testEvs = step 
+    where
+    step = do
+        mev <- getInput (Just 500)
+        when (mev /= Just (CharPress 'q')) $ do
+            forM mev $ \ev -> PUTS(show ev)
+            step
 
 main :: IO ()
 main = print =<< runMC test1
