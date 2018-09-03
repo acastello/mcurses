@@ -25,6 +25,8 @@ import Control.Monad.State
 
 import Data.Bifunctor
 import Data.Bits
+import Data.ByteString.Char8 (ByteString)
+import qualified Data.ByteString as BS
 import Data.Char
 -- import Data.Either
 import Data.List as L
@@ -55,6 +57,7 @@ data CursesEnv = CursesEnv
     , ce_dimensions   :: Map Window Props
     , ce_iptr         :: Ptr CInt
     , ce_mptr         :: Ptr MEVENT
+    , ce_hev          :: Maybe Input
     } 
 
 instance Show CursesEnv where
@@ -62,6 +65,12 @@ instance Show CursesEnv where
 
 getEnv :: Monad m => MC m CursesEnv 
 getEnv = MC get
+
+putEnv :: Monad m => CursesEnv -> MC m ()
+putEnv = MC . put
+
+modifyEnv :: Monad m => (CursesEnv -> CursesEnv) -> MC m ()
+modifyEnv = MC . modify'
 
 initCursesEnv :: IO CursesEnv
 initCursesEnv = do
@@ -75,7 +84,7 @@ initCursesEnv = do
       (pure stdWindow)  []    ncolors               -- tree    zorder   ncolors
       npairs            []    (height, width)       -- npairs  colormap hw
       (M.singleton stdWindow (Height, Width, 0, 0)) -- dimensions
-      iptr              mptr                        -- iptr    mptr
+      iptr              mptr  Nothing               -- iptr    mptr     hev
 
 data KeyboardInterrupt = KeyboardInterrupt
     deriving (Show)
@@ -328,6 +337,16 @@ setCursorMode :: MonadIO m => CursorMode -> MC m ()
 setCursorMode mode = io $ do
     void $ c_curs_set (fromEnum mode)
 
+moveCursor :: MonadIO m => Window -> Int -> Int -> MC m ()
+moveCursor win y x = io $ do ptr <- win_wptr win
+                             DRCCALL("wmove", c_wmove ptr y x)
+
+drawByteString :: MonadIO m => Window -> ByteString -> MC m ()
+drawByteString win str = io $ do
+    ptr <- win_wptr win
+    BS.useAsCStringLen str $ \(sptr, n) -> do
+        DRCCALL("waddnstr", c_waddnstr ptr sptr n)
+
 drawBorder :: MonadIO m => Window -> MC m ()
 drawBorder win = io $ do
     winp <- win_wptr win
@@ -370,7 +389,7 @@ readjustWin top = do mnode <- parentTree top
 
         when (h /= nh || w /= nw) $ io $ do
             ptr <- win_wptr win
-            DRCCALL("wresize", c_wresize ptr nw nh)
+            DRCCALL("wresize", c_wresize ptr nh nw)
                 
         forM_ ws (rtree (calcPropsFromAbs ndims))
 
@@ -393,32 +412,23 @@ windowDimensions win = io $ do p <- win_wptr win
 getFocus :: Monad m => MC m Window
 getFocus = maybe stdWindow fst . L.uncons . ce_zorder <$> getEnv
 
-getInput :: MonadIO m => Maybe Int -> MC m (Maybe Input)
-getInput mdelay = do
-    prev <- if isNothing mdelay then
-                getInput (Just 0)
+checkInput :: MonadIO m => CWindowPtr -> MC m (Maybe Input)
+checkInput wptr = MC $ get >>= \cenv -> io $ do
+    rc <- DCALL(c_wget_wch wptr (ce_iptr cenv))
+    code <- fi <$> peek (ce_iptr cenv)
+    PUTS("rc, code = " ++ show (rc, code))
+    if rc == c_ERR then
+        return Nothing
+    else do
+        liftM Just $ 
+            if rc == 0 then
+                parseChar code 
+            else if code == c_KEY_MOUSE then
+                parseMouse (ce_mptr cenv)
+            else if code == c_KEY_RESIZE then
+                return ScreenResized
             else
-                return Nothing
-    if not (isNothing prev) then
-        return prev
-    else MC $ get >>= \cenv -> io $ do
-        wptr <- win_wptr (maybe stdWindow fst $ L.uncons (ce_zorder cenv))
-        DCALL(c_wtimeout wptr (maybe (-1) id mdelay)) 
-        rc <- DCALL(c_wget_wch wptr (ce_iptr cenv))
-        code <- fi <$> peek (ce_iptr cenv)
-        PUTS("rc, code = " ++ show (rc, code))
-        if rc == c_ERR then
-            return Nothing
-        else do
-            liftM Just $ 
-                if rc == 0 then
-                    parseChar code 
-                else if code == c_KEY_MOUSE then
-                    parseMouse (ce_mptr cenv)
-                else if code == c_KEY_RESIZE then
-                    return ScreenResized
-                else
-                    parseKey code
+                parseKey code
     where
     parseKey :: Int -> IO Input
     parseKey code = return (KeyPress code)
@@ -428,9 +438,40 @@ getInput mdelay = do
                          return $ MouseInput (Click (fi x) (fi y) b)
     parseChar :: Int -> IO Input
     parseChar code = return (CharPress $ chr $ code)
+
+getInput :: MonadIO m => Maybe Int -> MC m (Maybe Input)
+getInput (Just n) | n < 0 = getInput Nothing
+getInput mdelay = do
+    cenv <- getEnv
+    case ce_hev cenv of
+      Just ev -> do putEnv cenv { ce_hev = Nothing }
+                    return (Just ev)
+      Nothing -> do
+        wptr <- io $ win_wptr (maybe stdWindow fst $ L.uncons $ ce_zorder cenv)
+        io $ DCALL(c_wtimeout wptr (maybe (-1) id mdelay)) 
+        in0 <- checkInput wptr
+        if in0 == Just ScreenResized || maybe False (< 250) mdelay then do
+            when (in0 == Just ScreenResized) $ do
+                readjustWin stdWindow
+            return in0
+        else do 
+            io $ DCALL(c_wtimeout wptr 0)
+            in1 <- checkInput wptr
+            if in1 == Just ScreenResized then do
+                putEnv cenv { ce_hev = in0 }
+                readjustWin stdWindow
+                return in1
+            else if isNothing in1 then
+                return in0
+            else do
+                putEnv cenv { ce_hev = in1 }
+                return in0
             
+waitInputUpTo :: MonadIO m => Int -> MC m (Maybe Input)
+waitInputUpTo n = getInput (Just n)
+
 waitInput :: MonadIO m => MC m Input
-waitInput = maybe (fail "getInput: Nothing") return =<< getInput Nothing
+waitInput = maybe (fail "waitInput: Nothing") return =<< getInput Nothing
 
 checkRC :: MonadIO m => String -> CInt -> m ()
 checkRC name code
@@ -452,25 +493,44 @@ test1 = do
     moveWindow win 5 (Width/2)
     render
     waitInput
-
-testResize :: MC IO Input
-testResize = do
-    win <- newWindow (Height - 4) (Width - 4) 2 2
-    drawBorder win
-    render
-    getInput (Just 1000)
-    moveWindow win 3 3
     render
     waitInput
+    render
+    waitInput
+
+testResize :: MC IO ()
+testResize = do
+    win <- newWindow (Height / 2) (Width / 2) (Height / 4) (Width / 4)
+    drawBorder win
+    moveCursor win 1 1 
+    drawByteString win "123456789abcdef123456789abcdef"
+    render
+    testEvs
 
 testEvs :: MC IO ()
 testEvs = step 
     where
     step = do
-        mev <- getInput (Just 500)
+        render 
+        mev <- getInput (Just 2000)
         when (mev /= Just (CharPress 'q')) $ do
             forM mev $ \ev -> PUTS(show ev)
             step
 
-main :: IO ()
-main = print =<< runMC test1
+-- testraw :: IO ()
+testraw = do
+    DCALL(c_initscr)
+    DCALL(c_start_color)
+    DCALL(c_use_default_colors)
+    DCALL(c_noecho)
+    DCALL(c_curs_set 0)
+    DCALL(c_cbreak)
+    DCALL(c_wtimeout c_stdscr (-1))
+    DCALL(c_keypad c_stdscr True)
+    DCALL(c_meta c_stdscr True)
+    r <- alloca $ \ptr -> replicateM 5 $ do ev <- c_wget_wch c_stdscr ptr
+                                            code <- peek ptr
+                                            return (ev, code)
+
+    DCALL(c_endwin)
+    return r

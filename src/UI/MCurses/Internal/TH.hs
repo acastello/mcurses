@@ -45,18 +45,18 @@ padFormatCall (x:xs) = lhs ++ rhs xs
               in (str ++ replicate (l - length str) ' ')
 
 
-qprint :: Exp -> Q Exp
-qprint e = do
-    let str = show e 
-    return $ AppE (VarE $ mkName "putStrLn") (LitE $ StringL str)
-
-rprint :: Exp -> Q Exp
-rprint e = lift . fmap show =<< reif e
-
-reif :: Exp -> Q [Info]
-reif (VarE n) = pure <$> reify n
-reif (ConE n) = pure <$> reify n
-reif (LitE _) = return []
-reif (AppE l r) = liftM2 (++) (reif l) (reif r)
-reif (AppTypeE l _) = reif l
-reif _ = return []
+-- qprint :: Exp -> Q Exp
+-- qprint e = do
+--     let str = show e 
+--     return $ AppE (VarE $ mkName "putStrLn") (LitE $ StringL str)
+-- 
+-- rprint :: Exp -> Q Exp
+-- rprint e = lift . fmap show =<< reif e
+-- 
+-- reif :: Exp -> Q [Info]
+-- reif (VarE n) = pure <$> reify n
+-- reif (ConE n) = pure <$> reify n
+-- reif (LitE _) = return []
+-- reif (AppE l r) = liftM2 (++) (reif l) (reif r)
+-- reif (AppTypeE l _) = reif l
+-- reif _ = return []

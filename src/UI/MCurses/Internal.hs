@@ -240,12 +240,21 @@ ICAPI(ungetch)        c_ungetch       :: Int -> IO CInt
 ICAPI(wtimeout)       c_wtimeout      :: CWindowPtr -> Int -> IO ()
 -- ICAPI(wtouchln)      c_wtouchln     ::
 
+-- Clearing
 ICAPI(wclear)         c_wclear        :: CWindowPtr -> IO CInt
+ICAPI(werase)         c_werase        :: CWindowPtr -> IO CInt
 -- Drawing
+ICAPI(wmove)          c_wmove         :: CWindowPtr -> Int -> Int -> IO CInt
+ICAPI(waddnstr)       c_waddnstr      :: CWindowPtr -> CString -> Int
+                                                    -> IO CInt
+-- ICAPI(waddnwstr)      c_waddnwstr     :: CWindowPtr -> Int      -> Int 
+--                                                     -> CWString -> Int
+--                                                     -> IO CInt
 ICAPI(wborder)        c_wborder       :: CWindowPtr -> CHType -> CHType 
                                                     -> CHType -> CHType 
                                                     -> CHType -> CHType 
-                                                    -> CHType -> CHType -> IO CInt
+                                                    -> CHType -> CHType 
+                                                    -> IO CInt
 -- WINDOW modification
 ICAPI(wresize)        c_wresize       :: CWindowPtr -> Int -> Int -> IO CInt
 
