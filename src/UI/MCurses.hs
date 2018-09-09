@@ -5,7 +5,8 @@ module UI.MCurses
   ( module UI.MCurses 
   , module UI.MCurses.Types
   , liftIO 
-  , MonadTrans (..), 
+  , MonadTrans (..)
+  , MonadMask 
   ) where
 
 #ifdef DEBUG
@@ -26,7 +27,7 @@ import Control.Monad.State
 import Data.Bifunctor
 import Data.Bits
 import Data.ByteString.Char8 (ByteString)
-import qualified Data.ByteString as BS
+import qualified Data.ByteString.Char8 as BS
 import Data.Char
 -- import Data.Either
 import Data.List as L
@@ -38,6 +39,7 @@ import Foreign hiding (void)
 import Foreign.C
 
 import System.IO
+import System.IO.Unsafe
 import System.Posix.Signals
 import System.Posix.Signals.Exts
 
@@ -341,6 +343,9 @@ moveCursor :: MonadIO m => Window -> Int -> Int -> MC m ()
 moveCursor win y x = io $ do ptr <- win_wptr win
                              DRCCALL("wmove", c_wmove ptr y x)
 
+erase :: MonadIO m => Window -> MC m ()
+erase win = io $ do ptr <- win_wptr win
+                    DRCCALL("werase", c_werase ptr)
 drawByteString :: MonadIO m => Window -> ByteString -> MC m ()
 drawByteString win str = io $ do
     ptr <- win_wptr win
@@ -473,11 +478,23 @@ waitInputUpTo n = getInput (Just n)
 waitInput :: MonadIO m => MC m Input
 waitInput = maybe (fail "waitInput: Nothing") return =<< getInput Nothing
 
+getByteString :: MonadIO m => MC m ByteString
+getByteString = liftM BS.pack step 
+    where
+    step = do 
+        ev <- waitInput
+        case ev of 
+            CharPress c | c == '\n' -> return []
+                        | otherwise -> (c:) `liftM` step
+            _ -> step
+
 checkRC :: MonadIO m => String -> CInt -> m ()
 checkRC name code
   | code == c_ERR = fail $ name ++ ": return code = ERR"
   | otherwise = return ()
 
+unsafeInterleaveMC :: MC IO a -> MC IO a
+unsafeInterleaveMC (MC (StateT op)) = MC $ StateT $ \x -> unsafeInterleaveIO (op x)
 io :: MonadIO m => IO a -> m a
 io = liftIO
 

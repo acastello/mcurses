@@ -224,7 +224,10 @@ ICAPI(touchwin)       c_touchwin      :: CWindowPtr -> IO CInt
 ICAPI(untouchwin)     c_untouchwin    :: CWindowPtr -> IO CInt
 ICAPI(waddwstr)       c_waddwstr      :: CWindowPtr -> CWString -> IO CInt
 ICAPI(has_mouse)      c_hasmouse      :: IO Bool
-foreign import capi interruptible "curses.h wget_wch" c_wget_wch :: CWindowPtr -> Ptr CInt -> IO CInt
+foreign import capi interruptible "curses.h wget_wch" 
+                           c_wget_wch :: CWindowPtr -> Ptr CInt -> IO CInt
+foreign import capi interruptible "curses.h wgetnstr"
+                      c_wgetnstr :: CWindowPtr -> CString -> Int -> IO CInt
 -- foreign import capi safe "curses.h ungetch" c_ungetch :: Int -> IO CInt
 ICAPI(ungetch)        c_ungetch       :: Int -> IO CInt
 -- ICAPI(wget_wch)       c_wget_wch      :: CWindowPtr -> Ptr CInt -> IO CInt
