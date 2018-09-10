@@ -28,20 +28,37 @@ newtype Curs m a b = Curs (StateArrow Asd (Kleisli (MC m)) a b)
     deriving (Functor, Applicative, Category, Arrow, ArrowChoice, ArrowApply, 
               ArrowLoop)
 
-signaler :: Curs IO [ByteString] [ByteString]
-signaler = repl ^>> act 
-    where repl [] = return []
-          repl (str:strss) = do moveCursor stdWindow 0 0
-                                erase stdWindow
-                                drawByteString stdWindow str
-                                x <- getByteString
-                                xs <- unsafeInterleaveMC (repl strss)
-                                return (x:xs)
-                        
+data Signal val = Signal val [Signal val]
 
-dsa :: Curs IO () [ByteString] 
+scan :: b -> (b -> a -> b) -> Signal a -> Signal b
+scan initV accumF (Signal val ss) = 
+    Signal initV (scan (accumF initV val) accumF <$> ss)
+
+signaler :: Curs IO (Signal ByteString) (Signal ByteString)
+signaler = (\s -> init >>= flip repl s) ^>> act 
+    where init = do y <- liftIO (randomRIO (0,1))
+                    x <- liftIO (randomRIO (0,1))
+                    w <- newWindow (Height/5) (Width/5) 
+                                   (Absolute y * Height) (Absolute x * Width)
+                    drawBorder w
+                    render
+                    return w
+          repl win (Signal str ss) = do 
+              moveCursor win 0 0
+              erase win
+              drawBorder win
+              drawByteString win str
+              render
+              x <- getByteString
+              xs <- unsafeInterleaveMC (repl win `mapM` ss)
+              when (L.null ss) $ do
+                  delWindow win
+              return (Signal x xs)
+
+dsa :: Curs IO () (Signal ByteString)
 dsa = proc () -> do
-    rec os <- signaler -< L.takeWhile (/= "q") ("start typing" : os)
+    rec let is = Signal "type" [os]
+        os <- signaler -< is
     returnA -< os
 
 asd :: Show a => [a] -> IO [a]
@@ -77,10 +94,10 @@ runCurs :: (MonadIO m, MonadMask m) => Curs m a b -> a -> m b
 runCurs (Curs op) i = runMC $ do
     fst <$> runKleisli (runState op) (i, Asd)
 
-act :: MonadIO m => Curs m (MC m output) output
+act :: Monad m => Curs m (MC m output) output
 act = Curs $ (A.lift) (Kleisli id)
 
-actM :: MonadIO m => Curs m (m output) output
+actM :: Monad m => Curs m (m output) output
 actM = Curs $ (A.lift) (Kleisli lift)
 
 iof :: MonadIO m => (a -> IO b) -> Curs m a b
