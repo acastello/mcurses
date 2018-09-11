@@ -28,13 +28,29 @@ newtype Curs m a b = Curs (StateArrow Asd (Kleisli (MC m)) a b)
     deriving (Functor, Applicative, Category, Arrow, ArrowChoice, ArrowApply, 
               ArrowLoop)
 
-data Signal val = Signal val (MC IO (Signal val))
+type IOMC = MC IO
+
+data Signal val = Signal (IOMC (Maybe (val, Signal val))) (IOMC ())
 
 cat :: val -> Signal val -> Signal val
-cat x = Signal x . return
+cat x preS = Signal (return $ Right (x, preS))
+
+cut :: (val -> Bool) -> Signal val -> Signal val
+cut cmp (Signal op) = Signal $ do
+    eith <- op
+    return $ case eith of
+        Left fin -> Left fin
+        Right (val, sig) | cmp val -> Left (return ())
+                         | otherwise -> Right (val, cut cmp sig)
+
+runSig :: Signal val -> IOMC [val]
+runSig (Signal op) = op >>= \eith -> case eith of
+    Left fin -> do fin
+                   return []
+    Right (val, sig) -> (val:) `liftM` runSig sig
 
 signaler :: Curs IO (Signal ByteString) (Signal ByteString)
-signaler = (\s -> init >>= flip repl s) ^>> act 
+signaler = (\s -> (flip cons s) `liftM` init) ^>> act 
     where 
     init = do 
         y <- liftIO (randomRIO (0,1))
@@ -44,22 +60,24 @@ signaler = (\s -> init >>= flip repl s) ^>> act
         drawBorder w
         render
         return w
-    repl win (Signal str getter) = do 
+    cons win (Signal op) = Signal $ do
+        eith <- op 
+        case eith of
+            Left fin -> return $ Left (fin >> delWindow win)
+            Right (val, sig) -> do
+                str <- repl win val
+                return $ Right (str, cons win sig)
+    repl win str = do 
         erase win
         drawBorder win
         moveCursor win 1 1
         drawByteString win str
         render
-        x <- getByteString
-        repl win =<< unsafeInterleaveIOMC getter
-        return (Signal x (returner win))
-    returner win = unsafeInterleaveMC $ do
-        x <- getByteString
-        return (Signal x (returner win))
+        getByteString
 
 dsa :: Curs IO () (Signal ByteString)
 dsa = proc () -> do
-    rec os <- signaler -< "type smh" `cat` os
+    rec os <- signaler -< cut (== "q") ("type here" `cat` os)
     returnA -< os
 
 asd :: Show a => [a] -> IO [a]
