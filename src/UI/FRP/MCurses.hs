@@ -28,7 +28,10 @@ newtype Curs m a b = Curs (StateArrow Asd (Kleisli (MC m)) a b)
     deriving (Functor, Applicative, Category, Arrow, ArrowChoice, ArrowApply, 
               ArrowLoop)
 
-type Signal val = [val]
+data Signal val = Signal val (MC IO (Signal val))
+
+cat :: val -> Signal val -> Signal val
+cat x = Signal x . return
 
 signaler :: Curs IO (Signal ByteString) (Signal ByteString)
 signaler = (\s -> init >>= flip repl s) ^>> act 
@@ -41,20 +44,22 @@ signaler = (\s -> init >>= flip repl s) ^>> act
         drawBorder w
         render
         return w
-    repl win (str : tailstrs) = do 
+    repl win (Signal str getter) = do 
         erase win
         drawBorder win
         moveCursor win 1 1
         drawByteString win str
         render
         x <- getByteString
-        xs <- unsafeInterleaveMC $ repl win tailstrs
-        return (x:xs)
+        repl win =<< unsafeInterleaveIOMC getter
+        return (Signal x (returner win))
+    returner win = unsafeInterleaveMC $ do
+        x <- getByteString
+        return (Signal x (returner win))
 
 dsa :: Curs IO () (Signal ByteString)
 dsa = proc () -> do
-    rec os <- signaler -< "type" : is
-        is <- signaler -< os
+    rec os <- signaler -< "type smh" `cat` os
     returnA -< os
 
 asd :: Show a => [a] -> IO [a]
