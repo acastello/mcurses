@@ -28,37 +28,33 @@ newtype Curs m a b = Curs (StateArrow Asd (Kleisli (MC m)) a b)
     deriving (Functor, Applicative, Category, Arrow, ArrowChoice, ArrowApply, 
               ArrowLoop)
 
-data Signal val = Signal val [Signal val]
-
-scan :: b -> (b -> a -> b) -> Signal a -> Signal b
-scan initV accumF (Signal val ss) = 
-    Signal initV (scan (accumF initV val) accumF <$> ss)
+type Signal val = [val]
 
 signaler :: Curs IO (Signal ByteString) (Signal ByteString)
 signaler = (\s -> init >>= flip repl s) ^>> act 
-    where init = do y <- liftIO (randomRIO (0,1))
-                    x <- liftIO (randomRIO (0,1))
-                    w <- newWindow (Height/5) (Width/5) 
-                                   (Absolute y * Height) (Absolute x * Width)
-                    drawBorder w
-                    render
-                    return w
-          repl win (Signal str ss) = do 
-              moveCursor win 0 0
-              erase win
-              drawBorder win
-              drawByteString win str
-              render
-              x <- getByteString
-              xs <- unsafeInterleaveMC (repl win `mapM` ss)
-              when (L.null ss) $ do
-                  delWindow win
-              return (Signal x xs)
+    where 
+    init = do 
+        y <- liftIO (randomRIO (0,1))
+        x <- liftIO (randomRIO (0,1))
+        w <- newWindow (Height/5) (Width/5) 
+                       (Absolute y * Height) (Absolute x * Width)
+        drawBorder w
+        render
+        return w
+    repl win (str : tailstrs) = do 
+        erase win
+        drawBorder win
+        moveCursor win 1 1
+        drawByteString win str
+        render
+        x <- getByteString
+        xs <- unsafeInterleaveMC $ repl win tailstrs
+        return (x:xs)
 
 dsa :: Curs IO () (Signal ByteString)
 dsa = proc () -> do
-    rec let is = Signal "type" [os]
-        os <- signaler -< is
+    rec os <- signaler -< "type" : is
+        is <- signaler -< os
     returnA -< os
 
 asd :: Show a => [a] -> IO [a]

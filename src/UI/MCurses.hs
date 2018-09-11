@@ -494,7 +494,9 @@ checkRC name code
   | otherwise = return ()
 
 unsafeInterleaveMC :: MC IO a -> MC IO a
-unsafeInterleaveMC (MC (StateT op)) = MC $ StateT $ \x -> unsafeInterleaveIO (op x)
+unsafeInterleaveMC (MC (StateT op)) = MC $ StateT $ 
+                                      \x -> unsafeInterleaveIO (op x)
+
 io :: MonadIO m => IO a -> m a
 io = liftIO
 
