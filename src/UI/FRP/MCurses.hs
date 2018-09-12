@@ -30,7 +30,7 @@ newtype Curs m a b = Curs (StateArrow Asd (Kleisli (MC m)) a b)
 
 type IOMC = MC IO
 
-data Signal val = Signal (IOMC (Maybe (val, Signal val))) (IOMC ())
+data Signal val = Signal (IOMC (Either (IOMC ()) (val, Signal val))) 
 
 cat :: val -> Signal val -> Signal val
 cat x preS = Signal (return $ Right (x, preS))
