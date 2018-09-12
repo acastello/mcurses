@@ -14,7 +14,10 @@ import Control.Monad.IO.Class
 
 import Data.ByteString (ByteString)
 import Data.ByteString.Char8 as BS
+import Data.Functor.Identity
 import Data.List as L
+
+import Debug.Trace
 
 import UI.MCurses hiding (io)
 -- import qualified UI.MCurses as C
@@ -30,26 +33,56 @@ newtype Curs m a b = Curs (StateArrow Asd (Kleisli (MC m)) a b)
 
 type IOMC = MC IO
 
-data Signal val = Signal (IOMC (Either (IOMC ()) (val, Signal val))) 
+newtype MList val = MList (IOMC (Maybe (val, MList val))) 
 
-cat :: val -> Signal val -> Signal val
-cat x preS = Signal (return $ Right (x, preS))
+instance Semigroup (MList val) where
+    (<>) = mappend
 
-cut :: (val -> Bool) -> Signal val -> Signal val
-cut cmp (Signal op) = Signal $ do
+instance Monoid (MList val) where
+    mempty = MList (return Nothing)
+
+instance Functor MList where
+    fmap f = mapMList (return . f)
+
+instance Applicative MList where
+    pure x = MList (return (Just (x, mempty)))
+
+mapMList :: (a -> IOMC b) -> MList a -> MList b
+mapMList f (MList op) = MList $ op >>= mapM
+    (\(x, ml) -> do y <- f x
+                    return (y, mapMList f ml))
+
+type ML m x = [m x]
+type L x = ML (MC IO) x
+
+catL :: Monad m => x -> ML m x -> ML m x
+catL x xs = return x : xs
+
+mapL :: Monad m => (x -> m y) -> ML m x -> ML m y
+mapL f xs = fmap (>>= f) xs
+
+runL :: Monad m => ML m x -> m [x]
+runL xs = sequence xs
+
+data Signal val = Signal (IOMC ()) (MList val)
+
+cat :: val -> MList val -> MList val
+cat x preS = MList (return $ Just (x, preS))
+
+cut :: (val -> Bool) -> MList val -> MList val
+cut cmp (MList op) = MList $ do
     eith <- op
     return $ case eith of
-        Left fin -> Left fin
-        Right (val, sig) | cmp val -> Left (return ())
-                         | otherwise -> Right (val, cut cmp sig)
+        Nothing -> Nothing
+        Just (val, sig) | cmp val -> Nothing
+                        | otherwise -> Just (val, cut cmp sig)
 
-runSig :: Signal val -> IOMC [val]
-runSig (Signal op) = op >>= \eith -> case eith of
-    Left fin -> do fin
-                   return []
-    Right (val, sig) -> (val:) `liftM` runSig sig
+runSig :: MList val -> IOMC [val]
+runSig (MList op) = op >>= \eith -> case eith of
+    Nothing -> return []
+    Just (val, sig) -> (val:) `liftM` runSig sig
 
-signaler :: Curs IO (Signal ByteString) (Signal ByteString)
+signaler :: Curs IO (MList ByteString) (MList ByteString)
 signaler = (\s -> (flip cons s) `liftM` init) ^>> act 
     where 
     init = do 
@@ -60,13 +93,7 @@ signaler = (\s -> (flip cons s) `liftM` init) ^>> act
         drawBorder w
         render
         return w
-    cons win (Signal op) = Signal $ do
-        eith <- op 
-        case eith of
-            Left fin -> return $ Left (fin >> delWindow win)
-            Right (val, sig) -> do
-                str <- repl win val
-                return $ Right (str, cons win sig)
+    cons win ml = mapMList (repl win) ml
     repl win str = do 
         erase win
         drawBorder win
@@ -74,18 +101,41 @@ signaler = (\s -> (flip cons s) `liftM` init) ^>> act
         drawByteString win str
         render
         getByteString
+        return $ case BS.uncons str of
+            Nothing -> "q"
+            Just (_, bs') -> bs'
 
-dsa :: Curs IO () (Signal ByteString)
-dsa = proc () -> do
+signaler' :: Curs IO (L ByteString) (L ByteString)
+signaler' = arr (mapL f) 
+    where
+    f bs = do
+        liftIO $ BS.appendFile "asd" (bs <> "\n")
+        case BS.uncons bs of
+            Nothing -> return ""
+            Just (_, bs') -> return bs'
+
+signaler'' :: MonadFix m => Kleisli m (ML m ByteString) (ML m ByteString)
+signaler'' = arr (mapL f)
+    where
+    f bs = do 
+        case BS.uncons bs of
+            Nothing -> return ""
+            Just (_, bs') -> return bs'
+
+a3 :: MonadFix m => Kleisli m () [ByteString]
+a3 = proc () -> do
+    rec os <- signaler'' -< "type here" `catL` (L.take 20 os)
+    Kleisli runL -< os
+
+a1 :: Curs IO () (MList ByteString)
+a1 = proc () -> do
     rec os <- signaler -< cut (== "q") ("type here" `cat` os)
     returnA -< os
 
-asd :: Show a => [a] -> IO [a]
-asd [] = return []
-asd (x:xs) = do
-    print x
-    ys <- unsafeInterleaveIO $ asd xs
-    return (x : ys)
+a2 :: Curs IO () [ByteString]
+a2 = proc () -> do
+    rec os <- signaler' -< "type here" `catL` os
+    act -< runL os
 
 feed :: Curs IO Integer [Integer]
 feed = rep ^>> actM
@@ -126,3 +176,6 @@ iof f = Curs $ StateArrow $ Kleisli $ \(x, s) -> do
 
 io :: MonadIO m => IO b -> Curs m () b
 io = iof . pure
+
+testfix :: IO [ByteString]
+testfix = mfix (\xs -> BS.appendFile "asd" (xs <> "\n") >> return ("some text" : (BS.drop 1 <$> xs)))
