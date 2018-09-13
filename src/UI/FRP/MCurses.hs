@@ -37,82 +37,75 @@ newtype Curs m a b = Curs (InputsReader (MCArrow m) a b)
     deriving (Functor, Applicative, Category, Arrow, ArrowChoice, ArrowApply, 
               ArrowLoop)
 
-type InputsReader = ReaderArrow (Signal Input)
+type InputsReader = ReaderArrow (SignalSource Input)
 type MCArrow m = Kleisli (MC m)
 
 type IOMC = MC IO
 
-newtype Signal val = Signal (IOMC (Maybe (val, Signal val))) 
+data Signal val = Signal val (SignalSource val)
+type SignalSource val = IOMC (Maybe (Signal val))
 
 instance Semigroup (Signal val) where
-    (<>) = mappend
+    Signal x op <> sig' = Signal x ((Just . maybe sig' (<> sig')) `liftM` op)
 
-instance Monoid (Signal val) where
-    mempty = Signal (return Nothing)
+-- instance Monoid (Signal val) where
+--     mempty = Signal (return Nothing)
+-- 
+-- instance Functor Signal where
+--     fmap f = mapSignal (return . f)
+-- 
+-- instance Applicative Signal where
+--     pure x = Signal (return (Just (x, mempty)))
+-- 
+mapSignal :: (a -> b) -> Signal a -> Signal b
+mapSignal f (Signal val op) = Signal (f val) (fmap (mapSignal f) `liftM` op)
 
-instance Functor Signal where
-    fmap f = mapSignal (return . f)
+mapSignalM :: (a -> IOMC b) -> Signal a -> IOMC (Signal b)
+mapSignalM f (Signal val op) = do
+    y <- f val
+    return $ Signal y (op >>= mapM (mapSignalM f))
 
-instance Applicative Signal where
-    pure x = Signal (return (Just (x, mempty)))
+foreverSignal :: a -> Signal a
+foreverSignal x = Signal x (return $ Just (foreverSignal x))
 
-mapSignal :: (a -> IOMC b) -> Signal a -> Signal b
-mapSignal f (Signal op) = Signal $ op >>= mapM
-    (\(x, ml) -> do y <- f x
-                    return (y, mapSignal f ml))
+foreverSource :: (IOMC a) -> SignalSource a
+foreverSource op = do x <- op
+                      return $ Just (Signal x (foreverSource op))
 
-foreverSignal :: (IOMC a) -> Signal a
-foreverSignal op = Signal $ do x <- op
-                               return $ Just (x, foreverSignal op)
-
-zipS :: (a -> b -> c) -> Signal a -> Signal b -> Signal c
-zipS f (Signal op) (Signal op') = Signal $ do
-    m <- op
-    m' <- op'
-    return $ liftM2 (\(x, s) (y, s') -> (f x y, zipS f s s')) m m'
-
+-- zipS :: (a -> b -> c) -> Signal a -> Signal b -> Signal c
+-- zipS f (Signal op) (Signal op') = Signal $ do
+--     m <- op
+--     m' <- op'
+--     return $ liftM2 (\(x, s) (y, s') -> (f x y, zipS f s s')) m m'
+-- 
 takeS :: Int -> Signal a -> Signal a
-takeS n s @ (Signal op) | n <= 0 = Signal (return Nothing)
-                        | otherwise = Signal $ do
-                            fmap (\(x,sig) -> (x, takeS (n-1) sig)) `liftM` op
+takeS n s @ (Signal x op) | n <= 1 = Signal x (return Nothing)
+                          | otherwise = Signal x $ do
+                              fmap (takeS (n-1)) `liftM` op
                             
 
-input :: MonadIO m => Curs m () (Signal ByteString)
-input = arr (\_ -> foreverSignal getByteString)
+input :: MonadIO m => Curs m () (Signal Input)
+input = (Curs readState >>^ (\s -> waitInput >>= \i -> return (Signal i s))) >>> act
 
-type ML m x = [m x]
-type L x = ML (MC IO) x
+-- until :: Signal val -> (val -> Bool) -> Signal val
+-- until = flip cut
+-- 
+cat :: a -> Signal a -> Signal a
+cat a sig = Signal a (return $ Just sig)
 
-catL :: Monad m => x -> ML m x -> ML m x
-catL x xs = return x : xs
-
-mapL :: Monad m => (x -> m y) -> ML m x -> ML m y
-mapL f xs = fmap (>>= f) xs
-
-runL :: Monad m => ML m x -> m [x]
-runL xs = sequence xs
-
-cat :: val -> Signal val -> Signal val
-cat x preS = Signal (return $ Just (x, preS))
-
-until :: Signal val -> (val -> Bool) -> Signal val
-until = flip cut
-
-cut :: (val -> Bool) -> Signal val -> Signal val
-cut cmp (Signal op) = Signal $ do
-    eith <- op
-    return $ case eith of
-        Nothing -> Nothing
-        Just (val, sig) | cmp val -> Nothing
-                        | otherwise -> Just (val, cut cmp sig)
+-- cut :: (val -> Bool) -> Signal val -> Signal val
+-- cut cmp (Signal op) = Signal $ do
+--     eith <- op
+--     return $ case eith of
+--         Nothing -> Nothing
+--         Just (val, sig) | cmp val -> Nothing
+--                         | otherwise -> Just (val, cut cmp sig)
 
 runSig :: Signal val -> IOMC [val]
-runSig (Signal op) = op >>= \eith -> case eith of
-    Nothing -> return []
-    Just (val, sig) -> (val:) `liftM` runSig sig
+runSig (Signal x op) = (x:) `liftM` (op >>= maybe (return []) runSig)
 
 signaler :: Curs IO (Signal ByteString) (Signal ByteString)
-signaler = (\s -> (flip cons s) `liftM` init) ^>> act 
+signaler = (\s -> cons s =<< init) ^>> act 
     where 
     init = do 
         y <- liftIO (randomRIO (0,1))
@@ -122,7 +115,7 @@ signaler = (\s -> (flip cons s) `liftM` init) ^>> act
         drawBorder w
         render
         return w
-    cons win ml = mapSignal (repl win) ml
+    cons ml win = mapSignalM (repl win) ml
     repl win str = do 
         erase win
         drawBorder win
@@ -132,43 +125,13 @@ signaler = (\s -> (flip cons s) `liftM` init) ^>> act
         render
         return (BS.drop 1 str)
 
-signaler' :: Curs IO (L ByteString) (L ByteString)
-signaler' = arr (mapL f) 
-    where
-    f bs = do
-        liftIO $ BS.appendFile "asd" (bs <> "\n")
-        case BS.uncons bs of
-            Nothing -> return ""
-            Just (_, bs') -> return bs'
-
-signaler'' :: MonadFix m => Kleisli m (ML m ByteString) (ML m ByteString)
-signaler'' = arr (mapL f)
-    where
-    f bs = do 
-        case BS.uncons bs of
-            Nothing -> return ""
-            Just (_, bs') -> return bs'
-
-a3 :: MonadFix m => Kleisli m () [ByteString]
-a3 = proc () -> do
-    rec os <- signaler'' -< "type here" `catL` (L.take 20 os)
-    Kleisli runL -< os
-
 a1 :: Curs IO () [ByteString]
 a1 = proc () -> do
-    is <- input -< ()
-    rec os <- signaler -< ("type here" `cat` takeS 20 is)
-        is <- signaler -< os
+    rec os <- signaler -< takeS 5 ("string" `cat` os)
     act -< runSig os
 
-a2 :: Curs IO () [ByteString]
-a2 = proc () -> do
-    rec os <- signaler' -< "type here" `catL` os
-    act -< runL os
-
-runCurs :: (MonadIO m, MonadMask m) => Curs m a b -> a -> m b
 runCurs (Curs op) i = runMC $ do
-    runKleisli (runReader op) (i, foreverSignal waitInput)
+    runKleisli (runReader op) (i, foreverSource waitInput)
 
 act :: Monad m => Curs m (MC m output) output
 act = Curs $ (A.lift) (Kleisli id)
@@ -176,26 +139,3 @@ act = Curs $ (A.lift) (Kleisli id)
 actM :: Monad m => Curs m (m output) output
 actM = Curs $ (A.lift) (Kleisli lift)
 
-testLoop :: MonadFix m => WriterT [String] m [String]
-testLoop = sequence (fix f) where
-    f ops = return "string" : (step <$> L.take 5 ops)
-    step op = op >>= \x -> tell [x] >> return (L.drop 1 x)
-
-testLoop' :: [IO String]
-testLoop' = (fix $ \ops -> return "string" : (f <$> L.take 5 ops)) where
-    f op = op >>= \x -> Prelude.putStrLn x >> return (L.drop 1 x)
-
-testLoop'' :: IO [String]
-testLoop'' = mfix f >>= sequence where
-    f ops = mapM g (return "string" : L.take 5 ops)
-    g op = op >>= \x -> Prelude.putStrLn x >> return (L.drop 1 `liftM` op)
-
-test :: IO [String]
-test = mfix f where
-  f xs = return ("string" : L.drop 1 `fmap` L.take 5 xs)
-
--- testLoop :: MonadFix m => Kleisli m () [String]
--- testLoop = proc () -> do
---     rec xs <- Kleisli (return . fmap (fmap (L.drop 1))) 
---                               -< return "first item" : (L.take 20 xs)
---     Kleisli sequence -< xs
