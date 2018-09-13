@@ -139,3 +139,7 @@ act = Curs $ (A.lift) (Kleisli id)
 actM :: Monad m => Curs m (m output) output
 actM = Curs $ (A.lift) (Kleisli lift)
 
+-- test :: Writer [ByteString] [ByteString]
+test = mfix f where
+    f strs = do print strs
+                return ("string" : (BS.drop 1 <$> L.take 5 strs))
