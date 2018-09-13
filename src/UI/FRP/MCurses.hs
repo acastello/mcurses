@@ -12,7 +12,6 @@ import Control.Concurrent
 import Control.Monad
 import Control.Monad.Fix
 import Control.Monad.IO.Class
-import Control.Monad.Trans.Writer
 
 import Data.ByteString (ByteString)
 import Data.ByteString.Char8 as BS
@@ -61,21 +60,19 @@ mapSignal f (Signal op) = Signal $ op >>= mapM
     (\(x, ml) -> do y <- f x
                     return (y, mapSignal f ml))
 
+consumeSignal :: (a -> IOMC (IOMC b)) -> Signal a -> IOMC (Signal b)
+consumeSignal f (Signal op) = op >>= \m -> case m of
+    Nothing -> return mempty
+    Just (x, sig) -> do op' <- f x
+                        return $ Signal $ do y <- op'
+                                             sig' <- consumeSignal f sig
+                                             return $ Just (y, sig')
+
 foreverSignal :: (IOMC a) -> Signal a
 foreverSignal op = Signal $ do x <- op
                                return $ Just (x, foreverSignal op)
 
-zipS :: (a -> b -> c) -> Signal a -> Signal b -> Signal c
-zipS f (Signal op) (Signal op') = Signal $ do
-    m <- op
-    m' <- op'
-    return $ liftM2 (\(x, s) (y, s') -> (f x y, zipS f s s')) m m'
 
-takeS :: Int -> Signal a -> Signal a
-takeS n s @ (Signal op) | n <= 0 = Signal (return Nothing)
-                        | otherwise = Signal $ do
-                            fmap (\(x,sig) -> (x, takeS (n-1) sig)) `liftM` op
-                            
 
 input :: MonadIO m => Curs m () (Signal ByteString)
 input = arr (\_ -> foreverSignal getByteString)
@@ -112,7 +109,7 @@ runSig (Signal op) = op >>= \eith -> case eith of
     Just (val, sig) -> (val:) `liftM` runSig sig
 
 signaler :: Curs IO (Signal ByteString) (Signal ByteString)
-signaler = (\s -> (flip cons s) `liftM` init) ^>> act 
+signaler = (\s -> cons s =<< init) ^>> act 
     where 
     init = do 
         y <- liftIO (randomRIO (0,1))
@@ -122,15 +119,15 @@ signaler = (\s -> (flip cons s) `liftM` init) ^>> act
         drawBorder w
         render
         return w
-    cons win ml = mapSignal (repl win) ml
+    cons ml win = consumeSignal (repl win) ml
     repl win str = do 
         erase win
         drawBorder win
         moveCursor win 1 1
-        drawByteString win (BS.drop 1 str)
-        liftIO (threadDelay 125000)
+        drawByteString win str
         render
-        return (BS.drop 1 str)
+        liftIO $ threadDelay 200000
+        return (return (BS.drop 1 str))
 
 signaler' :: Curs IO (L ByteString) (L ByteString)
 signaler' = arr (mapL f) 
@@ -149,22 +146,11 @@ signaler'' = arr (mapL f)
             Nothing -> return ""
             Just (_, bs') -> return bs'
 
-a3 :: MonadFix m => Kleisli m () [ByteString]
-a3 = proc () -> do
-    rec os <- signaler'' -< "type here" `catL` (L.take 20 os)
-    Kleisli runL -< os
-
-a1 :: Curs IO () [ByteString]
-a1 = proc () -> do
+m1 :: Curs IO () [ByteString]
+m1 = proc () -> do
     is <- input -< ()
-    rec os <- signaler -< ("type here" `cat` takeS 20 is)
-        is <- signaler -< os
-    act -< runSig os
-
-a2 :: Curs IO () [ByteString]
-a2 = proc () -> do
-    rec os <- signaler' -< "type here" `catL` os
-    act -< runL os
+    rec os <- signaler -< "string" `cat` is
+    act -< runSig (cut ((==0) . BS.length) os)
 
 runCurs :: (MonadIO m, MonadMask m) => Curs m a b -> a -> m b
 runCurs (Curs op) i = runMC $ do
@@ -176,26 +162,3 @@ act = Curs $ (A.lift) (Kleisli id)
 actM :: Monad m => Curs m (m output) output
 actM = Curs $ (A.lift) (Kleisli lift)
 
-testLoop :: MonadFix m => WriterT [String] m [String]
-testLoop = sequence (fix f) where
-    f ops = return "string" : (step <$> L.take 5 ops)
-    step op = op >>= \x -> tell [x] >> return (L.drop 1 x)
-
-testLoop' :: [IO String]
-testLoop' = (fix $ \ops -> return "string" : (f <$> L.take 5 ops)) where
-    f op = op >>= \x -> Prelude.putStrLn x >> return (L.drop 1 x)
-
-testLoop'' :: IO [String]
-testLoop'' = mfix f >>= sequence where
-    f ops = mapM g (return "string" : L.take 5 ops)
-    g op = op >>= \x -> Prelude.putStrLn x >> return (L.drop 1 `liftM` op)
-
-test :: IO [String]
-test = mfix f where
-  f xs = return ("string" : L.drop 1 `fmap` L.take 5 xs)
-
--- testLoop :: MonadFix m => Kleisli m () [String]
--- testLoop = proc () -> do
---     rec xs <- Kleisli (return . fmap (fmap (L.drop 1))) 
---                               -< return "first item" : (L.take 20 xs)
---     Kleisli sequence -< xs
