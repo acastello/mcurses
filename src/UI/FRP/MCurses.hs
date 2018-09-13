@@ -12,6 +12,7 @@ import Control.Concurrent
 import Control.Monad
 import Control.Monad.Fix
 import Control.Monad.IO.Class
+import Control.Monad.Trans.Writer
 
 import Data.ByteString (ByteString)
 import Data.ByteString.Char8 as BS
@@ -64,7 +65,17 @@ foreverSignal :: (IOMC a) -> Signal a
 foreverSignal op = Signal $ do x <- op
                                return $ Just (x, foreverSignal op)
 
+zipS :: (a -> b -> c) -> Signal a -> Signal b -> Signal c
+zipS f (Signal op) (Signal op') = Signal $ do
+    m <- op
+    m' <- op'
+    return $ liftM2 (\(x, s) (y, s') -> (f x y, zipS f s s')) m m'
 
+takeS :: Int -> Signal a -> Signal a
+takeS n s @ (Signal op) | n <= 0 = Signal (return Nothing)
+                        | otherwise = Signal $ do
+                            fmap (\(x,sig) -> (x, takeS (n-1) sig)) `liftM` op
+                            
 
 input :: MonadIO m => Curs m () (Signal ByteString)
 input = arr (\_ -> foreverSignal getByteString)
@@ -116,7 +127,8 @@ signaler = (\s -> (flip cons s) `liftM` init) ^>> act
         erase win
         drawBorder win
         moveCursor win 1 1
-        drawByteString win str
+        drawByteString win (BS.drop 1 str)
+        liftIO (threadDelay 125000)
         render
         return (BS.drop 1 str)
 
@@ -145,7 +157,9 @@ a3 = proc () -> do
 a1 :: Curs IO () [ByteString]
 a1 = proc () -> do
     is <- input -< ()
-    act -< runSig (is `until` (== "q"))
+    rec os <- signaler -< ("type here" `cat` takeS 20 is)
+        is <- signaler -< os
+    act -< runSig os
 
 a2 :: Curs IO () [ByteString]
 a2 = proc () -> do
@@ -162,3 +176,26 @@ act = Curs $ (A.lift) (Kleisli id)
 actM :: Monad m => Curs m (m output) output
 actM = Curs $ (A.lift) (Kleisli lift)
 
+testLoop :: MonadFix m => WriterT [String] m [String]
+testLoop = sequence (fix f) where
+    f ops = return "string" : (step <$> L.take 5 ops)
+    step op = op >>= \x -> tell [x] >> return (L.drop 1 x)
+
+testLoop' :: [IO String]
+testLoop' = (fix $ \ops -> return "string" : (f <$> L.take 5 ops)) where
+    f op = op >>= \x -> Prelude.putStrLn x >> return (L.drop 1 x)
+
+testLoop'' :: IO [String]
+testLoop'' = mfix f >>= sequence where
+    f ops = mapM g (return "string" : L.take 5 ops)
+    g op = op >>= \x -> Prelude.putStrLn x >> return (L.drop 1 `liftM` op)
+
+test :: IO [String]
+test = mfix f where
+  f xs = return ("string" : L.drop 1 `fmap` L.take 5 xs)
+
+-- testLoop :: MonadFix m => Kleisli m () [String]
+-- testLoop = proc () -> do
+--     rec xs <- Kleisli (return . fmap (fmap (L.drop 1))) 
+--                               -< return "first item" : (L.take 20 xs)
+--     Kleisli sequence -< xs
