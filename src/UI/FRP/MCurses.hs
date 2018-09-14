@@ -70,14 +70,20 @@ mapCells f (Signal op) = Signal $ op >>= mapM trans
     trans (c, sig) = f c >>= \c' -> return (c', mapCells f sig)
 
 mapSignalWithInit :: (a -> IOMC (IOMC (), IOMC b)) -> Signal a -> IOMC (Signal b)
-mapSignalWithInit genOp (Signal op) = liftIO newUnique $ \u -> (Signal $ op >>= mapM (trans u))
+mapSignalWithInit genOp sig = do
+    u <- liftIO newUnique 
+    return (map' u sig)
     where
-    trans u (ConstCell x, sig) = do 
+    map' u (Signal op) = Signal (op >>= trans u)
+    trans _ Nothing = return Nothing
+    trans u (Just (ConstCell x, sig)) = do 
         (ini, f) <- genOp x
-        return $ (,) (InitCell ini) $ Signal $ do
+        return $ Just $ (,) (InitCell u ini) $ Signal $ do
             y <- f 
-            return $ Just (ConstCell y, mapSignalWithInit genOp sig)
-    trans u (InitCell u' ini, sig) | u == u' = = return (InitCell ini, mapSignalWithInit genOp sig)
+            return $ Just (ConstCell y, map' u sig)
+    trans u (Just (InitCell u' ini, sigNext @ (Signal op'))) 
+        | u /= u' = return $ Just (InitCell u' ini, map' u sigNext)
+        | u == u' = op' >>= trans u 
 
 foreverSignal :: (IOMC a) -> Signal a
 foreverSignal op = Signal $ do 
@@ -87,22 +93,34 @@ foreverSignal op = Signal $ do
 cat :: a -> Signal a -> Signal a
 cat x sig = Signal (return (Just (ConstCell x, sig)))
 
+until :: Signal a -> (a -> Bool) -> Signal a
+until s f = untilM s (return . f)
+
+untilM :: Signal a -> (a -> IOMC Bool) -> Signal a
+untilM (Signal op) cmp = Signal $ op >>= \m -> case m of
+    Nothing -> return Nothing
+    Just (c @ InitCell {}, sig) -> return $ Just (c, untilM sig cmp)
+    Just (c @ (ConstCell x), sig) -> do 
+        b <- cmp x
+        return $ if b then Nothing 
+                      else Just (c, untilM sig cmp)
+
 runSig :: Signal a -> IOMC [a]
 runSig (Signal op) = op >>= maybe (return []) f
     where
     f (c, sig) = liftM2 (++) (f' c) (runSig sig) 
     f' (ConstCell x) = return [x]
-    f' (InitCell ini) = ini >> return []
+    f' (InitCell _ ini) = ini >> return []
 
-debugSig :: Signal a -> IOMC [a]
-debugSig (Signal op) = op >>= maybe (return []) f
-    where
-    f (c, sig) = liftM2 (++) (f' c) (debugSig sig)
-    f' (ConstCell x) = liftIO (BS.hPutStrLn stderr "Const") >> return [x]
-    f' (InitCell ini) = liftIO (BS.hPutStrLn stderr "Init") >> ini >> return []
-
+-- debugSig :: Signal a -> IOMC [a]
+-- debugSig (Signal op) = op >>= maybe (return []) f
+--     where
+--     f (c, sig) = liftM2 (++) (f' c) (debugSig sig)
+--     f' (ConstCell x) = liftIO (BS.hPutStrLn stderr "Const") >> return [x]
+--     f' (InitCell ini) = liftIO (BS.hPutStrLn stderr "Init") >> ini >> return []
+-- 
 signaler :: Curs IO (Signal ByteString) (Signal ByteString)
-signaler = (\s -> cons s `liftM` init) ^>> act 
+signaler = (\s -> cons s =<< init) ^>> act 
     where 
     init = do 
         y <- liftIO (randomRIO (0,1))
@@ -126,8 +144,9 @@ signaler = (\s -> cons s `liftM` init) ^>> act
 
 m1 :: Curs IO () [ByteString]
 m1 = proc () -> do
-    rec os <- signaler -< "string" `cat` os
-    act -< debugSig os
+    rec os <- signaler -< "string" `cat` is
+        is <- signaler -< (os `until` (== ""))
+    act -< runSig os
 
 input :: Curs IOMC () (Signal ByteString)
 input = arr (\() -> foreverSignal getByteString)
