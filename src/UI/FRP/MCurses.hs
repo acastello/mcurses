@@ -1,4 +1,4 @@
-{-# LANGUAGE Arrows, GeneralizedNewtypeDeriving #-}
+{-# LANGUAGE Arrows, GeneralizedNewtypeDeriving, GADTs, RankNTypes, ImpredicativeTypes #-}
 
 module UI.FRP.MCurses where
 
@@ -18,6 +18,7 @@ import Data.ByteString.Char8 as BS
 import Data.Functor.Identity
 import Data.List as L
 import Data.Semigroup
+import Data.Unique
 
 import Debug.Trace
 
@@ -42,11 +43,9 @@ type IOMC = MC IO
 
 newtype Signal val = Signal (SignalSource val)
 
-type SignalSource val = IOMC (Maybe (SignalWrap val)) 
-type SignalWrap val = (SignalValue val, Signal val)
-data SignalValue val = SimpleValue val 
-                     | InitializedValue (IOMC ()) (IOMC val)
-                     
+type SignalSource val = IOMC (Maybe (SignalTup val)) 
+type SignalTup val = (SignalCell val, Signal val)
+data SignalCell val = ConstCell val | InitCell Unique (IOMC ())
 
 -- instance Semigroup (Signal val) where
 --     (<>) = mappend
@@ -65,55 +64,77 @@ data SignalValue val = SimpleValue val
 --     (\(x, ml) -> do y <- f x
 --                     return (y, mapSignal f ml))
 -- 
--- map
-
-mapSignalWithInit :: (a -> IOMC (IOMC (), IOMC b)) -> Signal a -> Signal b
-mapSignalWithInit f (Signal op) = Signal (op >>= mapM step)
+mapCells :: (SignalCell a -> IOMC (SignalCell b)) -> Signal a -> Signal b
+mapCells f (Signal op) = Signal $ op >>= mapM trans
     where
-    step x = undefined
+    trans (c, sig) = f c >>= \c' -> return (c', mapCells f sig)
 
--- foreverSignal :: (IOMC a) -> Signal a
--- foreverSignal op = Signal $ do 
---     x <- op
---     return $ Just (return (), x, foreverSignal op)
--- 
--- runSig :: Signal a -> IOMC [a]
--- runSig (Signal op) = do
+mapSignalWithInit :: (a -> IOMC (IOMC (), IOMC b)) -> Signal a -> IOMC (Signal b)
+mapSignalWithInit genOp (Signal op) = liftIO newUnique $ \u -> (Signal $ op >>= mapM (trans u))
+    where
+    trans u (ConstCell x, sig) = do 
+        (ini, f) <- genOp x
+        return $ (,) (InitCell ini) $ Signal $ do
+            y <- f 
+            return $ Just (ConstCell y, mapSignalWithInit genOp sig)
+    trans u (InitCell u' ini, sig) | u == u' = = return (InitCell ini, mapSignalWithInit genOp sig)
 
--- input :: MonadIO m => Curs m () (Signal ByteString)
--- input = arr (\_ -> foreverSignal getByteString)
+foreverSignal :: (IOMC a) -> Signal a
+foreverSignal op = Signal $ do 
+    x <- op
+    return $ Just (ConstCell x, foreverSignal op)
 
--- signaler :: Curs IO (Signal ByteString) (Signal ByteString)
--- signaler = (\s -> cons s `liftM` init) ^>> act 
---     where 
---     init = do 
---         y <- liftIO (randomRIO (0,1))
---         x <- liftIO (randomRIO (0,1))
---         w <- newWindow (Height/5) (Width/5) 
---                        (Absolute y * Height) (Absolute x * Width)
---         drawBorder w
---         render
---         return w
---     cons sig win = mapSignalWithInit (\x -> (rend win x, tran win x)) sig
---     rend win str = do 
---         erase win
---         drawBorder win
---         moveCursor win 1 1
---         drawByteString win str
---         render
---         liftIO $ threadDelay 200000
---     tran win str = do 
---         return (BS.drop 1 str)
+cat :: a -> Signal a -> Signal a
+cat x sig = Signal (return (Just (ConstCell x, sig)))
 
--- m1 :: Curs IO () [ByteString]
--- m1 = proc () -> do
---     is <- input -< ()
---     rec os <- signaler -< "string" `cat` is
---     act -< runSig (cut ((==0) . BS.length) os)
--- 
--- runCurs :: (MonadIO m, MonadMask m) => Curs m a b -> a -> m b
--- runCurs (Curs op) i = runMC $ do
---     runKleisli (runReader op) (i, foreverSignal waitInput)
+runSig :: Signal a -> IOMC [a]
+runSig (Signal op) = op >>= maybe (return []) f
+    where
+    f (c, sig) = liftM2 (++) (f' c) (runSig sig) 
+    f' (ConstCell x) = return [x]
+    f' (InitCell ini) = ini >> return []
+
+debugSig :: Signal a -> IOMC [a]
+debugSig (Signal op) = op >>= maybe (return []) f
+    where
+    f (c, sig) = liftM2 (++) (f' c) (debugSig sig)
+    f' (ConstCell x) = liftIO (BS.hPutStrLn stderr "Const") >> return [x]
+    f' (InitCell ini) = liftIO (BS.hPutStrLn stderr "Init") >> ini >> return []
+
+signaler :: Curs IO (Signal ByteString) (Signal ByteString)
+signaler = (\s -> cons s `liftM` init) ^>> act 
+    where 
+    init = do 
+        y <- liftIO (randomRIO (0,1))
+        x <- liftIO (randomRIO (0,1))
+        w <- newWindow (Height/5) (Width/5) 
+                       (Absolute y * Height) (Absolute x * Width)
+        drawBorder w
+        render
+        return w
+    cons sig win = mapSignalWithInit (\str -> return (rend win str, 
+                                                      tran win str)) sig
+    rend win str = do 
+        erase win
+        drawBorder win
+        moveCursor win 1 1
+        drawByteString win str
+        render
+        liftIO $ threadDelay 200000
+    tran win str = do 
+        return (BS.drop 1 str)
+
+m1 :: Curs IO () [ByteString]
+m1 = proc () -> do
+    rec os <- signaler -< "string" `cat` os
+    act -< debugSig os
+
+input :: Curs IOMC () (Signal ByteString)
+input = arr (\() -> foreverSignal getByteString)
+
+runCurs :: (MonadIO m, MonadMask m) => Curs m a b -> a -> m b
+runCurs (Curs op) i = runMC $ do
+    runKleisli (runReader op) (i, foreverSignal waitInput)
 
 act :: Monad m => Curs m (MC m output) output
 act = Curs $ (A.lift) (Kleisli id)
