@@ -155,13 +155,13 @@ debugSig (Signal op) = op >>= maybe (return []) f
     f' (ConstCell x) = liftIO (BS.hPutStrLn stderr "Const") >> return [x]
     f' (InitCell _ ini) = liftIO (BS.hPutStrLn stderr "Init") >> ini >> return []
 
-signaler :: Int -> Curs IO (Signal ByteString) (Signal ByteString)
-signaler n = (\s -> consum s =<< iniW) ^>> act 
+signaler :: Int -> Int -> Curs IO (Signal ByteString) (Signal ByteString)
+signaler delayn dropn = (\s -> consum s =<< iniW) ^>> act 
     where 
     iniW = do 
         y <- liftIO (randomRIO (0.2,0.8))
         x <- liftIO (randomRIO (0.2,0.8))
-        w <- newWindow (Height/5) (Width/5) 
+        w <- newWindow (Height/4) (Width/4) 
                        (Absolute y * Height) (Absolute x * Width)
         drawBorder w
         render
@@ -174,14 +174,18 @@ signaler n = (\s -> consum s =<< iniW) ^>> act
         moveCursor win 1 1
         drawByteString win str
         render
-        liftIO $ threadDelay (n * 100000)
+        liftIO $ threadDelay (delayn * 100000)
     tran _ str = do 
-        return (BS.drop 1 str)
+        liftIO $ hPrint stderr $ "signaler: " <> str
+        return (BS.drop dropn str)
 
 m1 :: Curs IO () [ByteString]
 m1 = proc () -> do
-    rec os <- signaler 4 -< pure "string" <> is
-        let is = mapMSignal (\x -> liftIO (randomRIO ('A','z')) >>= \c -> return (x <> BS.singleton c)) os
+    rec os <- signaler 9 2 -< pure "string strung" <> is
+        let is = mapMSignal (\x -> do c <- liftIO (randomRIO ('A','C')) 
+                                      liftIO $ hPrint stderr c
+                                      return (x <> BS.singleton c)) os
+        -- let is = mapMSignal (return . (<> ">")) os
     act -< runSig (os `until` ((== 0) . BS.length))
 
 input :: Curs IO () (Signal ByteString)
