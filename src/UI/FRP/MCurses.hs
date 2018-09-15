@@ -159,8 +159,8 @@ signaler :: Int -> Curs IO (Signal ByteString) (Signal ByteString)
 signaler n = (\s -> consum s =<< iniW) ^>> act 
     where 
     iniW = do 
-        y <- liftIO (randomRIO (0,1))
-        x <- liftIO (randomRIO (0,1))
+        y <- liftIO (randomRIO (0.2,0.8))
+        x <- liftIO (randomRIO (0.2,0.8))
         w <- newWindow (Height/5) (Width/5) 
                        (Absolute y * Height) (Absolute x * Width)
         drawBorder w
@@ -174,18 +174,17 @@ signaler n = (\s -> consum s =<< iniW) ^>> act
         moveCursor win 1 1
         drawByteString win str
         render
-        liftIO $ BS.hPutStrLn stderr str
         liftIO $ threadDelay (n * 100000)
     tran _ str = do 
-        return (BS.drop 1 str <> BS.pack [BS.head str])
+        return (BS.drop 1 str)
 
 m1 :: Curs IO () [ByteString]
 m1 = proc () -> do
-    rec os <- signaler 5 -< is
-        is <- signaler 5 -< pure "string" <> os
-    act -< debugSig (os `until` ((== 0) . BS.length))
+    rec os <- signaler 4 -< pure "string" <> is
+        let is = mapMSignal (\x -> liftIO (randomRIO ('A','z')) >>= \c -> return (x <> BS.singleton c)) os
+    act -< runSig (os `until` ((== 0) . BS.length))
 
-input :: Curs IOMC () (Signal ByteString)
+input :: Curs IO () (Signal ByteString)
 input = arr (\() -> foreverSignal getByteString)
 
 runCurs :: (MonadIO m, MonadMask m) => Curs m a b -> a -> m b
