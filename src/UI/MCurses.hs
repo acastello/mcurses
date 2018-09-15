@@ -30,6 +30,7 @@ import Data.ByteString.Char8 (ByteString)
 import qualified Data.ByteString.Char8 as BS
 import Data.Char
 -- import Data.Either
+import Data.IORef
 import Data.List as L
 import Data.Maybe
 import Data.Map as M
@@ -59,6 +60,7 @@ data CursesEnv = CursesEnv
     , ce_dimensions   :: Map Window Props
     , ce_iptr         :: Ptr CInt
     , ce_mptr         :: Ptr MEVENT
+    , ce_finis        :: IORef [Either CWindowPtr CPanelPtr]
     , ce_hev          :: Maybe Input
     } 
 
@@ -82,11 +84,13 @@ initCursesEnv = do
     height <- fi <$> peek c_LINES
     iptr <- new c_ERR
     mptr <- calloc
+    ioref <- newIORef []
     return $ CursesEnv
       (pure stdWindow)  []    ncolors               -- tree    zorder   ncolors
       npairs            []    (height, width)       -- npairs  colormap hw
       (M.singleton stdWindow (Height, Width, 0, 0)) -- dimensions
-      iptr              mptr  Nothing               -- iptr    mptr     hev
+      iptr              mptr  ioref                 -- iptr    mptr     finis
+      Nothing                                       -- hev
 
 data KeyboardInterrupt = KeyboardInterrupt
     deriving (Show)
@@ -138,7 +142,7 @@ mapMC = undefined
 runMC :: (MonadIO m, MonadMask m) => MC m a -> m a
 runMC op = bracket pre post curs 
     where
-    curs _ = do
+    curs (_,env) = do
         io $ do 
             DCALL(c_initscr)
             DRCCALL("runMC, wclear",      c_wclear c_stdscr)
@@ -151,16 +155,15 @@ runMC op = bracket pre post curs
             DCALL(c_mousemask (c_ALL_MOUSE_EVENTS .|. c_REPORT_MOUSE_POSITION) nullPtr)
             DRCCALL("runMC, keypad",      c_keypad c_stdscr True)
             DRCCALL("runMC, meta",        c_meta c_stdscr True)
-        evalStateT cleanUpAfter =<< io initCursesEnv
-    cleanUpAfter = do r <- unCurses op
-                      cenv <- get
-                      forM_ (ce_tree cenv) (unCurses . delWindow)
-                      return r
+        evalStateT (unCurses op) env
     pre = io $ do tid <- myThreadId
-                  installHandler keyboardSignal 
+                  h <- installHandler keyboardSignal 
                       (Catch $ throwTo tid KeyboardInterrupt) Nothing
-    post h = io $ do installHandler keyboardSignal h Nothing
-                     c_endwin
+                  (,) h `liftM` initCursesEnv
+    post (h,ce) = io $ do installHandler keyboardSignal h Nothing
+                          finisl <- readIORef (ce_finis ce) 
+                          mapM_ (either c_delwin c_del_panel) finisl
+                          c_endwin
 
 render :: MonadIO m => MC m ()
 render = void $ MC $ io $ do
@@ -171,11 +174,13 @@ render = void $ MC $ io $ do
 newWindowUnder :: MonadIO m => Window -> Prop -> Prop -> Prop 
                                -> Prop -> MC m Window
 newWindowUnder parent hd wd yd xd = do
+    cenv <- getEnv
     f <- calcPropsF parent
     let (h, w, y, d) = f (hd, wd, yd, xd)
     win <- io $ do winp <- DCALL(c_newwin h w y d)
                    panp <- DCALL(c_new_panel winp)
                    c_keypad winp True
+                   modifyIORef (ce_finis cenv) ([Left winp, Right panp] ++)
                    return (Window (Right panp))
     underWindow_ (pure win :) parent
     MC $ modify (\e -> e { ce_dimensions = M.insert win (hd, wd, yd, xd) 
@@ -206,12 +211,15 @@ delWindow win
   | win == stdWindow = return ()
   | otherwise = do
       mall_wins <- withWindow (\x -> (x, Nothing)) win
+      finis <- ce_finis `liftM` getEnv
       forM_ mall_wins $ mapM_ $ \w -> do
           io $ case win_pointer w of
-              Left wp -> DRCCALL("delWindow, c_delwin", c_delwin wp)
+              Left wp -> do DRCCALL("delWindow, c_delwin", c_delwin wp)
+                            modifyIORef finis (L.delete $ Left wp)
               Right pp -> do wp <- c_panel_window pp
                              DRCCALL("delWindow, c_del_panel", c_del_panel pp)
                              DRCCALL("delWindow, c_delwin", c_delwin wp)
+                             modifyIORef finis (L.\\ [Left wp, Right pp])
           MC $ modify' $ \ce -> 
               ce { ce_zorder = L.delete w (ce_zorder ce) }
 
