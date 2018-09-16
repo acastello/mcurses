@@ -15,6 +15,8 @@ import Data.List as L
 import Data.Semigroup
 import Data.Unique
 
+import Control.Wire hiding (id)
+
 import Prelude hiding (until)
 
 import System.IO
@@ -30,13 +32,21 @@ type InputsReader = ReaderArrow (SignalSource Input)
 type MCArrow m = Kleisli (MC m)
 
 type IOMC = MC IO
+type SignalSource = IOMC
 
-type SignalSource = IOMC 
-
-data Signal a where
-    Pure :: SignalSource a -> Signal a
-    Source :: SignalSource x -> (x -> SignalSource a) -> Signal a
-
+-- 
+-- instance Functor Signal where
+--     fmap f (Pure returner) = Pure (f `liftM` returner)
+--     fmap f (Gen s trans) = Gen s (liftM f . trans)
+-- 
+-- instance Applicative Signal where
+--     pure = Pure . return
+-- 
+-- scan :: a -> (a -> b -> a) -> Signal b -> Signal a
+-- scan initValue accumF sig = case sig of
+--     Pure ret = Pure (return initValue) `Gen` (\i 
+--     Gen source trans = Gen source (\x -> 
+-- 
 -- signaler :: Int -> Int -> Curs IO (Signal ByteString) (Signal ByteString)
 -- signaler delayn dropn = (\s -> consum s `liftM` iniW) ^>> act 
 --     where 
@@ -48,7 +58,7 @@ data Signal a where
 --         drawBorder w
 --         render
 --         return w
---     consum sig win = sig >>= \str -> rend win str >> tran win str
+--     consum sig win = Gen sig $ \str -> rend win str >> tran win str
 --     rend win str = do 
 --         erase win
 --         drawBorder win
@@ -62,8 +72,8 @@ data Signal a where
 -- 
 -- m1 :: Curs IO () ByteString
 -- m1 = proc () -> do
---     rec os <- signaler 9 2 -< return "string strung" >> os
---     act -< os
+--     rec os <- signaler 9 2 -< pure "string strung"
+--     act -< runSig os
 
 -- input :: Curs IO () (Signal ByteString)
 -- input = arr (\() -> foreverSignal getByteString)
