@@ -15,6 +15,8 @@ import Data.List as L
 import Data.Semigroup
 import Data.Unique
 
+import FRP.Yampa
+
 import Prelude hiding (until)
 
 import System.IO
