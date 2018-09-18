@@ -59,9 +59,10 @@ signaler delayn dropn = mkGen startit
 m1 :: Curs () ByteString
 m1 = proc () -> do
     rec 
-        is <- delay "string strung" <<< until -< (os, ev)
+        is <- delay "string strung" -< fs
         os <- signaler 3 2 -< is
         ev <- noLonger ((> 0) . BS.length) -< os
+        fs <- until -< (os, ev)
     returnA -< os
 
 runCurs :: Curs () a -> IO [a]
