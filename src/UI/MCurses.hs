@@ -1,5 +1,8 @@
-{-# LANGUAGE CPP, GeneralizedNewtypeDeriving, 
-    CApiFFI, TemplateHaskell #-}
+{-# LANGUAGE  CPP                           #-} 
+{-# LANGUAGE  GeneralizedNewtypeDeriving    #-}
+{-# LANGUAGE  CApiFFI                       #-}
+{-# LANGUAGE  TemplateHaskell               #-}
+{-# LANGUAGE  RankNTypes                    #-}
 
 module UI.MCurses
   ( module UI.MCurses 
@@ -10,8 +13,8 @@ module UI.MCurses
   ) where
 
 #ifdef DEBUG
-#define DCALL(FCALL) ($([|FCALL|] >>= formatCall) >>= \(str,r) -> \
-                        (liftIO $ hPutStrLn stderr (padFormatCall $ words str)) >> return r)
+#define DCALL(FCALL) ($([|FCALL|] >>= formatCall) >>= \(_str,_r) -> \
+          (liftIO $ hPutStrLn stderr (padFormatCall $ words _str)) >> return _r)
 #define PUTS(STR) (liftIO $ hPutStrLn stderr (STR))
 #else
 #define DCALL(FCALL) (FCALL)
@@ -50,6 +53,11 @@ import UI.MCurses.Internal.TH
 #endif
 import UI.MCurses.Types
 
+data WindowInfo = WindowInfo
+    { wi_props  :: Relatives
+    , wi_dims   :: Dimensions
+    }
+
 data CursesEnv = CursesEnv 
     { ce_tree         :: Tree Window 
     , ce_zorder       :: [Window]
@@ -57,7 +65,7 @@ data CursesEnv = CursesEnv
     , ce_npairs       :: Int
     , ce_colormap     :: [((Color, Color), Int)]
     , ce_hw           :: (Int, Int)
-    , ce_dimensions   :: Map Window Props
+    , ce_dimensions   :: Map Window Relatives
     , ce_iptr         :: Ptr CInt
     , ce_mptr         :: Ptr MEVENT
     , ce_finis        :: IORef [Either CWindowPtr CPanelPtr]
@@ -171,11 +179,11 @@ render = void $ MC $ io $ do
     c_update_panels
     c_doupdate
 
-newWindowUnder :: MonadIO m => Window -> Prop -> Prop -> Prop 
-                               -> Prop -> MC m Window
+newWindowUnder :: MonadIO m => Window -> Relative -> Relative -> Relative 
+                               -> Relative -> MC m Window
 newWindowUnder parent hd wd yd xd = do
     cenv <- getEnv
-    f <- calcPropsF parent
+    f <- calcRelativesF parent
     let (h, w, y, d) = f (hd, wd, yd, xd)
     win <- io $ do winp <- DCALL(c_newwin h w y d)
                    panp <- DCALL(c_new_panel winp)
@@ -188,14 +196,14 @@ newWindowUnder parent hd wd yd xd = do
                          , ce_zorder = win : ce_zorder e })
     return win
 
-newWindow :: MonadIO m => Prop -> Prop -> Prop -> Prop 
+newWindow :: MonadIO m => Relative -> Relative -> Relative -> Relative 
                                     -> MC m Window
 newWindow = newWindowUnder stdWindow
 
-newRegion :: MonadIO m => Window -> Prop -> Prop -> Prop 
-                                 -> Prop -> MC m Window
+newRegion :: MonadIO m => Window -> Relative -> Relative -> Relative 
+                                 -> Relative -> MC m Window
 newRegion parent hd wd yd xd = do
-    f <- calcPropF parent
+    f <- calcRelativeF parent
     win <- io $ do pwinp <- win_wptr parent
                    winp <- c_subwin pwinp (f hd False) (f wd True)
                                           (f yd False) (f xd True)
@@ -312,33 +320,33 @@ childrenWins win = maybe mempty id `liftM` underWindow (\x -> (x, x)) win
 parentWin_ :: Monad m => Window -> MC m Window
 parentWin_ w = maybe stdWindow id <$> parentWin w 
 
-screenProps :: MonadIO m => MC m (Int, Int, Int, Int)
-screenProps = do
+screenRelatives :: MonadIO m => MC m (Int, Int, Int, Int)
+screenRelatives = do
     (h, w) <- ce_hw <$> getEnv
     return (h, w, 0, 0)
 
-calcPropF :: MonadIO m => Window -> MC m (Prop -> Bool -> Int)
-calcPropF pwin = io $ do
+calcRelativeF :: MonadIO m => Window -> MC m (Relative -> Bool -> Int)
+calcRelativeF pwin = io $ do
     win <- win_wptr pwin
     y0 <- c_getbegy win
     x0 <- c_getbegx win
     y1 <- c_getmaxy win
     x1 <- c_getmaxx win
-    return $ calcPropFromAbs (y1 - y0, x1 - x0, y0, x0)
+    return $ calcRelativeFromAbs (y1 - y0, x1 - x0, y0, x0)
 
-calcPropFromAbs :: Dimensions -> Prop -> Bool -> Int
-calcPropFromAbs (h, w, _, _) d horz =
-        let n = calcProp h w d
+calcRelativeFromAbs :: Dimensions -> Relative -> Bool -> Int
+calcRelativeFromAbs (h, w, _, _) d horz =
+        let n = calcRelative h w d
         in if horz then max 0 $ min w n else max 0 $ min h n 
 
-calcPropsF :: MonadIO m => Window -> MC m (Props -> Dimensions)
-calcPropsF parent = do
+calcRelativesF :: MonadIO m => Window -> MC m (Relatives -> Dimensions)
+calcRelativesF parent = do
     abss <- windowDimensions parent
-    return (calcPropsFromAbs abss)
+    return (calcRelativesFromAbs abss)
 
-calcPropsFromAbs :: Dimensions -> Props -> Dimensions
-calcPropsFromAbs abss @ (ph, pw, py, px) (hd, wd, yd, xd) =
-    let f = calcPropFromAbs abss
+calcRelativesFromAbs :: Dimensions -> Relatives -> Dimensions
+calcRelativesFromAbs abss @ (ph, pw, py, px) (hd, wd, yd, xd) =
+    let f = calcRelativeFromAbs abss
         (h, w, y, x) = (f hd False, f wd True, f yd False, f xd True)
     in (h, w, py + if y + h > ph then ph - h else y
             , px + if x + w > pw then pw - w else x)
@@ -365,14 +373,20 @@ drawBorder win = io $ do
     winp <- win_wptr win
     void $ c_wborder winp 0 0 0 0 0 0 0 0
 
-moveWindow :: MonadIO m => Window -> Prop -> Prop -> MC m ()
+newtype Editing m a = Editing (ReaderT Window (MC m) a)
+    deriving (Functor, Applicative, Monad)
+
+onWindow :: MonadIO m => Window -> Editing m a -> MC m a
+onWindow win (Editing ops) = undefined -- runReaderT ops win
+
+moveWindow :: MonadIO m => Window -> Relative -> Relative -> MC m ()
 moveWindow win yp xp = do
-    adjustProps win (\(h, w, _, _) -> (h, w, yp, xp))
+    adjustRelatives win (\(h, w, _, _) -> (h, w, yp, xp))
     readjustWin win
 
-resizeWindow :: MonadIO m => Window -> Prop -> Prop -> MC m ()
+resizeWindow :: MonadIO m => Window -> Relative -> Relative -> MC m ()
 resizeWindow win h w = do
-    adjustProps win (\(_, _, y, x) -> (h, w, y, x))
+    adjustRelatives win (\(_, _, y, x) -> (h, w, y, x))
     readjustWin win
 
 recalcWin :: MonadIO m => Window -> MC m ()
@@ -384,19 +398,19 @@ io_movewindow w y x = case win_pointer w of
     Left wptr -> DRCCALL("mvwin", c_mvwin wptr y x)
     Right pptr -> DRCCALL("move_panel", c_move_panel pptr y x)
 
-adjustProps :: Monad m => Window -> (Props -> Props) -> MC m ()
-adjustProps w f = MC $ modify' $ 
+adjustRelatives :: Monad m => Window -> (Relatives -> Relatives) -> MC m ()
+adjustRelatives w f = MC $ modify' $ 
         \e -> e { ce_dimensions = M.adjust f w (ce_dimensions e) }
 
 readjustWin :: MonadIO m => Window -> MC m ()
 readjustWin top = do mnode <- parentTree top
                      forM_ mnode $ \(Node w ws) -> do
-                         f <- calcPropsF w 
+                         f <- calcRelativesF w 
                          rtree f `mapM_` (L.find ((== top) . rootLabel) ws)
     where 
     rtree f (Node win ws) = do
         (h,  w,  y,  x) <- windowDimensions win
-        ndims @ (nh, nw, ny, nx) <- f <$> windowProps win
+        ndims @ (nh, nw, ny, nx) <- f <$> windowRelatives win
         when (y /= ny || x /= nx) $ io $ do
             io_movewindow win ny nx
 
@@ -404,18 +418,18 @@ readjustWin top = do mnode <- parentTree top
             ptr <- win_wptr win
             DRCCALL("wresize", c_wresize ptr nh nw)
                 
-        forM_ ws (rtree (calcPropsFromAbs ndims))
+        forM_ ws (rtree (calcRelativesFromAbs ndims))
 
 
-adjustSize :: MonadIO m => (Props -> Dimensions) -> Window -> MC m Dimensions
+adjustSize :: MonadIO m => (Relatives -> Dimensions) -> Window -> MC m Dimensions
 adjustSize f win = MC $ get >>= \cenv -> io $ do
     let dims = maybe (Height, Width, 0, 0) id 
                      (M.lookup win (ce_dimensions cenv))
     return (f dims)
 
-windowProps :: MonadIO m => Window -> MC m Props
-windowProps w = do pmap <- ce_dimensions <$> getEnv
-                   return (maybe (Height, Width, 0, 0) id (M.lookup w pmap))
+windowRelatives :: MonadIO m => Window -> MC m Relatives
+windowRelatives w = do pmap <- ce_dimensions <$> getEnv
+                       return (maybe (Height, Width, 0, 0) id (M.lookup w pmap))
 
 windowDimensions :: MonadIO m => Window -> MC m Dimensions
 windowDimensions win = io $ do p <- win_wptr win 
@@ -544,20 +558,3 @@ testEvs = step
             forM mev $ \ev -> PUTS(show ev)
             step
 
--- testraw :: IO ()
-testraw = do
-    DCALL(c_initscr)
-    DCALL(c_start_color)
-    DCALL(c_use_default_colors)
-    DCALL(c_noecho)
-    DCALL(c_curs_set 0)
-    DCALL(c_cbreak)
-    DCALL(c_wtimeout c_stdscr (-1))
-    DCALL(c_keypad c_stdscr True)
-    DCALL(c_meta c_stdscr True)
-    r <- alloca $ \ptr -> replicateM 5 $ do ev <- c_wget_wch c_stdscr ptr
-                                            code <- peek ptr
-                                            return (ev, code)
-
-    DCALL(c_endwin)
-    return r

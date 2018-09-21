@@ -23,25 +23,25 @@ win_wptr w = case win_pointer w of
     Left ptr -> return ptr
     Right pptr -> c_panel_window pptr
 
-type Props = (Prop, Prop, Prop, Prop)
+type Relatives = (Relative, Relative, Relative, Relative)
 type Dimensions = (Int, Int, Int, Int)
 
-data Prop 
+data Relative
   = Width | Height 
-  | Absolute Double
-  | Neg Prop
-  | Add Prop Prop
-  | Sub Prop Prop
-  | Mult Prop Prop
-  | Div Prop Prop
-  | Pow Prop Double
+  | Constant Double
+  | Neg Relative
+  | Add Relative Relative
+  | Sub Relative Relative
+  | Mult Relative Relative
+  | Div Relative Relative
+  | Pow Relative Double
 
-instance Show Prop where
+instance Show Relative where
     show Height = "Height"
     show Width = "Width"
-    show (Absolute x) = show x
+    show (Constant x) = show x
     show (Neg (Neg x)) = show x
-    show (Neg (Absolute x)) = "-" ++ show x
+    show (Neg (Constant x)) = "-" ++ show x
     show (Neg x) = "-(" ++ show x ++ ")"
     show (Add x y) = show x ++ " + " ++ show y
     show (Sub x y) = show x ++ " - " ++ case y of
@@ -57,11 +57,11 @@ instance Show Prop where
         Sub _ _ -> "(" ++ show y ++ ")"
         Mult _ _ -> "(" ++ show y ++ ")"
         _ -> show y 
-    show (Pow (Absolute x) p) = show x ++ "^" ++ show p
+    show (Pow (Constant x) p) = show x ++ "^" ++ show p
     show (Pow x p) = "(" ++ show x ++ ")^" ++ show p
   
-instance Num Prop where
-    fromInteger = Absolute . fromInteger
+instance Num Relative where
+    fromInteger = Constant . fromInteger
     (+) = Add
     (-) = Sub
     (*) = Mult
@@ -69,16 +69,16 @@ instance Num Prop where
     abs = undefined
     signum = undefined
 
-instance Fractional Prop where
-    fromRational = Absolute . fromRational
+instance Fractional Relative where
+    fromRational = Constant . fromRational
     (/) = Div
 
-calcProp :: Int -> Int -> Prop -> Int
-calcProp h w = round . casef where
+calcRelative :: Int -> Int -> Relative -> Int
+calcRelative h w = round . casef where
     casef dim = case dim of
         Width       -> fi w
         Height      -> fi h
-        Absolute x  -> x
+        Constant x  -> x
         Neg x       -> negate (casef x)
         Add x y     -> casef x + casef y
         Sub x y     -> casef x - casef y
