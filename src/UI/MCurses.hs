@@ -23,6 +23,7 @@ module UI.MCurses
 #define DRCCALL(NAME, FCALL) (checkRC NAME =<< DCALL(FCALL))
 
 import Control.Concurrent
+import Control.Lens
 import Control.Monad.Catch
 import Control.Monad.Reader 
 import Control.Monad.State
@@ -53,28 +54,31 @@ import UI.MCurses.Internal.TH
 #endif
 import UI.MCurses.Types
 
-data WindowInfo = WindowInfo
-    { wi_props  :: Relatives
-    , wi_dims   :: Dimensions
+data WindowStatus = WindowStatus
+    { _wi_props  :: Relatives
+    , _wi_dims   :: Dimensions
     }
+makeLenses ''WindowStatus
 
 data CursesEnv = CursesEnv 
-    { ce_tree         :: Tree Window 
-    , ce_zorder       :: [Window]
-    , ce_ncolors      :: Int
-    , ce_npairs       :: Int
-    , ce_colormap     :: [((Color, Color), Int)]
-    , ce_hw           :: (Int, Int)
-    , ce_dimensions   :: Map Window Relatives
-    , ce_iptr         :: Ptr CInt
-    , ce_mptr         :: Ptr MEVENT
-    , ce_finis        :: IORef [Either CWindowPtr CPanelPtr]
-    , ce_hev          :: Maybe Input
+    { _ce_tree         :: Tree Window 
+    , _ce_zorder       :: [Window]
+    , _ce_ncolors      :: Int
+    , _ce_npairs       :: Int
+    , _ce_colormap     :: [((Color, Color), Int)]
+    , _ce_hw           :: (Int, Int)
+    , _ce_statuses     :: Map Window WindowStatus
+    , _ce_iptr         :: Ptr CInt
+    , _ce_mptr         :: Ptr MEVENT
+    , _ce_finis        :: IORef [Either CWindowPtr CPanelPtr]
+    , _ce_hev          :: Maybe Input
     } 
+makeLenses ''CursesEnv
 
 instance Show CursesEnv where
-    show = show . ce_colormap
+    show = show . _ce_colormap
 
+{-
 getEnv :: Monad m => MC m CursesEnv 
 getEnv = MC get
 
@@ -83,6 +87,13 @@ putEnv = MC . put
 
 modifyEnv :: Monad m => (CursesEnv -> CursesEnv) -> MC m ()
 modifyEnv = MC . modify'
+
+windowInfo :: Window -> MC m WindowStatus
+windowInfo win = undefined
+
+modifyWindowStatus :: Monad m => Window -> (WindowStatus -> WindowStatus) -> MC m ()
+modifyWindowStatus win f = MC $ modify' $ 
+          \e -> e { _ce_statuses = f (_ce_statuses e) }
 
 initCursesEnv :: IO CursesEnv
 initCursesEnv = do
@@ -113,7 +124,7 @@ instance Exception CursesFailed
 getPairID :: MonadIO m => Color -> Color -> MC m ColorID
 getPairID DefaultColor DefaultColor = return 0
 getPairID fore back = do
-    env @ CursesEnv { ce_npairs = npairs, ce_colormap = cmap } <- getEnv
+    env @ CursesEnv { _ce_npairs = npairs, _ce_colormap = cmap } <- getEnv
     case L.lookup (fore, back) cmap of
         Just i -> return i
         Nothing -> do
@@ -131,7 +142,7 @@ getPairID fore back = do
                                   ((fore, back), i) : cmap
                               else
                                   ((fore, back), i) : L.init cmap
-                MC $ put env { ce_colormap = newcmap }
+                MC $ put env { _ce_colormap = newcmap }
             return i
 
 newtype MC m a = MC { unCurses :: StateT CursesEnv m a }
@@ -169,7 +180,7 @@ runMC op = bracket pre post curs
                       (Catch $ throwTo tid KeyboardInterrupt) Nothing
                   (,) h `liftM` initCursesEnv
     post (h,ce) = io $ do installHandler keyboardSignal h Nothing
-                          finisl <- readIORef (ce_finis ce) 
+                          finisl <- readIORef (_ce_finis ce) 
                           mapM_ (either c_delwin c_del_panel) finisl
                           c_endwin
 
@@ -188,12 +199,12 @@ newWindowUnder parent hd wd yd xd = do
     win <- io $ do winp <- DCALL(c_newwin h w y d)
                    panp <- DCALL(c_new_panel winp)
                    c_keypad winp True
-                   modifyIORef (ce_finis cenv) ([Left winp, Right panp] ++)
+                   modifyIORef (_ce_finis cenv) ([Left winp, Right panp] ++)
                    return (Window (Right panp))
     underWindow_ (pure win :) parent
-    MC $ modify (\e -> e { ce_dimensions = M.insert win (hd, wd, yd, xd) 
-                                                    (ce_dimensions e) 
-                         , ce_zorder = win : ce_zorder e })
+    MC $ modify (\e -> e { _ce_dimensions = M.insert win (hd, wd, yd, xd) 
+                                                    (_ce_dimensions e) 
+                         , _ce_zorder = win : _ce_zorder e })
     return win
 
 newWindow :: MonadIO m => Relative -> Relative -> Relative -> Relative 
@@ -209,9 +220,9 @@ newRegion parent hd wd yd xd = do
                                           (f yd False) (f xd True)
                    return (Window $ Left winp)
     underWindow_ (pure win :) parent
-    MC $ modify' (\e -> e { ce_dimensions = M.insert win (hd, wd, yd, xd)
-                                                         (ce_dimensions e)
-                          , ce_zorder = win : ce_zorder e }) 
+    MC $ modify' (\e -> e { _ce_dimensions = M.insert win (hd, wd, yd, xd)
+                                                         (_ce_dimensions e)
+                          , _ce_zorder = win : _ce_zorder e }) 
     return win
 
 delWindow :: MonadIO m => Window -> MC m ()
@@ -219,7 +230,7 @@ delWindow win
   | win == stdWindow = return ()
   | otherwise = do
       mall_wins <- withWindow (\x -> (x, Nothing)) win
-      finis <- ce_finis `liftM` getEnv
+      finis <- _ce_finis `liftM` getEnv
       forM_ mall_wins $ mapM_ $ \w -> do
           io $ case win_pointer w of
               Left wp -> do DRCCALL("delWindow, c_delwin", c_delwin wp)
@@ -229,13 +240,13 @@ delWindow win
                              DRCCALL("delWindow, c_delwin", c_delwin wp)
                              modifyIORef finis (L.\\ [Left wp, Right pp])
           MC $ modify' $ \ce -> 
-              ce { ce_zorder = L.delete w (ce_zorder ce) }
+              ce { _ce_zorder = L.delete w (_ce_zorder ce) }
 
 stdWindow :: Window 
 stdWindow = Window (Left c_stdscr) 
 
 findUnder :: Monad m => Window -> MC m (Forest Window)
-findUnder win = MC $ (maybe [] id . under . ce_tree <$> get) 
+findUnder win = MC $ (maybe [] id . under . _ce_tree <$> get) 
     where under (Node win' st) | win == win' = Just st
                                | otherwise   = L.foldl step Nothing st
           step (Just x) _ = Just x
@@ -244,10 +255,10 @@ findUnder win = MC $ (maybe [] id . under . ce_tree <$> get)
 withWindow :: MonadIO m => (Tree Window -> (b, Maybe (Tree Window))) 
                          -> Window -> MC m (Maybe b)
 withWindow f win = MC $ do
-    st @ CursesEnv { ce_tree = tree } <- get
+    st @ CursesEnv { _ce_tree = tree } <- get
     let (e, mnewtree) = go tree
         newtree = maybe tree id mnewtree
-    put st { ce_tree = newtree }
+    put st { _ce_tree = newtree }
     return e
     where
  -- go :: Tree Window -> (Maybe b, Maybe (Tree Window))
@@ -294,7 +305,7 @@ underdeg win tree f = deg win tree (\t -> (\fo -> Just t { subForest = fo })
                       <$> (f $ subForest t))
 
 winTree :: Monad m => Window -> MC m (Maybe WinTree)
-winTree win = ptree . ce_tree <$> getEnv
+winTree win = ptree . _ce_tree <$> getEnv
     where
     ptree n @ (Node w ws) | win == w  = Just n
                           | otherwise = L.foldl step Nothing ws
@@ -302,9 +313,9 @@ winTree win = ptree . ce_tree <$> getEnv
     step Nothing f = ptree f
 
 parentTree :: Monad m => Window -> MC m (Maybe WinTree)
-parentTree win | win == stdWindow = Just . Node stdWindow . (:[]) . ce_tree 
+parentTree win | win == stdWindow = Just . Node stdWindow . (:[]) . _ce_tree 
                                             <$> getEnv
-               | otherwise        = ptree . ce_tree <$> getEnv
+               | otherwise        = ptree . _ce_tree <$> getEnv
     where
     ptree n @ (Node _ ws) | win `L.elem` (rootLabel <$> ws)  = Just n
                           | otherwise = L.foldl step Nothing ws 
@@ -322,7 +333,7 @@ parentWin_ w = maybe stdWindow id <$> parentWin w
 
 screenRelatives :: MonadIO m => MC m (Int, Int, Int, Int)
 screenRelatives = do
-    (h, w) <- ce_hw <$> getEnv
+    (h, w) <- _ce_hw <$> getEnv
     return (h, w, 0, 0)
 
 calcRelativeF :: MonadIO m => Window -> MC m (Relative -> Bool -> Int)
@@ -373,10 +384,10 @@ drawBorder win = io $ do
     winp <- win_wptr win
     void $ c_wborder winp 0 0 0 0 0 0 0 0
 
-newtype Editing m a = Editing (ReaderT Window (MC m) a)
-    deriving (Functor, Applicative, Monad)
+newtype Editing a = Editing (StateT WindowStatus IO a)
+    deriving (Functor, Applicative, Monad, MonadState WindowStatus)
 
-onWindow :: MonadIO m => Window -> Editing m a -> MC m a
+onWindow :: MonadIO m => Window -> Editing a -> MC m a
 onWindow win (Editing ops) = undefined -- runReaderT ops win
 
 moveWindow :: MonadIO m => Window -> Relative -> Relative -> MC m ()
@@ -400,7 +411,7 @@ io_movewindow w y x = case win_pointer w of
 
 adjustRelatives :: Monad m => Window -> (Relatives -> Relatives) -> MC m ()
 adjustRelatives w f = MC $ modify' $ 
-        \e -> e { ce_dimensions = M.adjust f w (ce_dimensions e) }
+        \e -> e { _ce_dimensions = M.adjust f w (_ce_dimensions e) }
 
 readjustWin :: MonadIO m => Window -> MC m ()
 readjustWin top = do mnode <- parentTree top
@@ -420,16 +431,8 @@ readjustWin top = do mnode <- parentTree top
                 
         forM_ ws (rtree (calcRelativesFromAbs ndims))
 
-
-adjustSize :: MonadIO m => (Relatives -> Dimensions) -> Window -> MC m Dimensions
-adjustSize f win = MC $ get >>= \cenv -> io $ do
-    let dims = maybe (Height, Width, 0, 0) id 
-                     (M.lookup win (ce_dimensions cenv))
-    return (f dims)
-
 windowRelatives :: MonadIO m => Window -> MC m Relatives
-windowRelatives w = do pmap <- ce_dimensions <$> getEnv
-                       return (maybe (Height, Width, 0, 0) id (M.lookup w pmap))
+windowRelatives w = wi_props `liftM` windowInfo w 
 
 windowDimensions :: MonadIO m => Window -> MC m Dimensions
 windowDimensions win = io $ do p <- win_wptr win 
@@ -437,12 +440,12 @@ windowDimensions win = io $ do p <- win_wptr win
                                             (c_getbegy p) (c_getbegx p)
 
 getFocus :: Monad m => MC m Window
-getFocus = maybe stdWindow fst . L.uncons . ce_zorder <$> getEnv
+getFocus = maybe stdWindow fst . L.uncons . _ce_zorder <$> getEnv
 
 checkInput :: MonadIO m => CWindowPtr -> MC m (Maybe Input)
 checkInput wptr = MC $ get >>= \cenv -> io $ do
-    rc <- DCALL(c_wget_wch wptr (ce_iptr cenv))
-    code <- fi <$> peek (ce_iptr cenv)
+    rc <- DCALL(c_wget_wch wptr (_ce_iptr cenv))
+    code <- fi <$> peek (_ce_iptr cenv)
     PUTS("rc, code = " ++ show (rc, code))
     if rc == c_ERR then
         return Nothing
@@ -451,7 +454,7 @@ checkInput wptr = MC $ get >>= \cenv -> io $ do
             if rc == 0 then
                 parseChar code 
             else if code == c_KEY_MOUSE then
-                parseMouse (ce_mptr cenv)
+                parseMouse (_ce_mptr cenv)
             else if code == c_KEY_RESIZE then
                 return ScreenResized
             else
@@ -470,11 +473,11 @@ getInput :: MonadIO m => Maybe Int -> MC m (Maybe Input)
 getInput (Just n) | n < 0 = getInput Nothing
 getInput mdelay = do
     cenv <- getEnv
-    case ce_hev cenv of
-      Just ev -> do putEnv cenv { ce_hev = Nothing }
+    case _ce_hev cenv of
+      Just ev -> do putEnv cenv { _ce_hev = Nothing }
                     return (Just ev)
       Nothing -> do
-        wptr <- io $ win_wptr (maybe stdWindow fst $ L.uncons $ ce_zorder cenv)
+        wptr <- io $ win_wptr (maybe stdWindow fst $ L.uncons $ _ce_zorder cenv)
         io $ DCALL(c_wtimeout wptr (maybe (-1) id mdelay)) 
         in0 <- checkInput wptr
         if in0 == Just ScreenResized || maybe False (< 250) mdelay then do
@@ -485,13 +488,13 @@ getInput mdelay = do
             io $ DCALL(c_wtimeout wptr 0)
             in1 <- checkInput wptr
             if in1 == Just ScreenResized then do
-                putEnv cenv { ce_hev = in0 }
+                putEnv cenv { _ce_hev = in0 }
                 readjustWin stdWindow
                 return in1
             else if isNothing in1 then
                 return in0
             else do
-                putEnv cenv { ce_hev = in1 }
+                putEnv cenv { _ce_hev = in1 }
                 return in0
             
 waitInputUpTo :: MonadIO m => Int -> MC m (Maybe Input)
@@ -558,3 +561,4 @@ testEvs = step
             forM mev $ \ev -> PUTS(show ev)
             step
 
+-}
