@@ -23,20 +23,21 @@ win_wptr w = case win_pointer w of
     Left ptr -> return ptr
     Right pptr -> c_panel_window pptr
 
-type Relatives = (Relative, Relative, Relative, Relative)
+type RDimensions = (RDimension, RDimension, RDimension, RDimension)
 type Dimensions = (Int, Int, Int, Int)
 
-data Relative
+data RDimension
   = Width | Height 
   | Constant Double
-  | Neg Relative
-  | Add Relative Relative
-  | Sub Relative Relative
-  | Mult Relative Relative
-  | Div Relative Relative
-  | Pow Relative Double
+  | Neg RDimension
+  | Add RDimension RDimension
+  | Sub RDimension RDimension
+  | Mult RDimension RDimension
+  | Div RDimension RDimension
+  | Pow RDimension Double
+  deriving Eq
 
-instance Show Relative where
+instance Show RDimension where
     show Height = "Height"
     show Width = "Width"
     show (Constant x) = show x
@@ -60,7 +61,7 @@ instance Show Relative where
     show (Pow (Constant x) p) = show x ++ "^" ++ show p
     show (Pow x p) = "(" ++ show x ++ ")^" ++ show p
   
-instance Num Relative where
+instance Num RDimension where
     fromInteger = Constant . fromInteger
     (+) = Add
     (-) = Sub
@@ -69,12 +70,12 @@ instance Num Relative where
     abs = undefined
     signum = undefined
 
-instance Fractional Relative where
+instance Fractional RDimension where
     fromRational = Constant . fromRational
     (/) = Div
 
-calcRelative :: Int -> Int -> Relative -> Int
-calcRelative h w = round . casef where
+calcRDimension :: Int -> Int -> RDimension -> Int
+calcRDimension h w = round . casef where
     casef dim = case dim of
         Width       -> fi w
         Height      -> fi h
