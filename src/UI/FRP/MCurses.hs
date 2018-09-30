@@ -32,8 +32,8 @@ asd = mkGen_ $ \str -> do
     c <- liftIO $ randomRIO ('A','z')
     return $ Right (c : str)
 
-signaler :: Int -> Int -> Curs ByteString ByteString
-signaler delayn dropn = mkGen startit
+window :: Int -> Int -> Curs ByteString ByteString
+window delayn dropn = mkGen startit
     where 
     startit () str = do win <- iniW
                         y <- repl win str
@@ -52,7 +52,7 @@ signaler delayn dropn = mkGen startit
         render
         liftIO $ threadDelay (delayn * 100000)
     tran _ str = do 
-        liftIO $ hPrint stderr $ "signaler: " <> str
+        liftIO $ hPrint stderr $ "window: " <> str
         ch <- liftIO (randomRIO ('A','z'))
         return (BS.drop dropn $ str <> BS.singleton ch)
                                           
@@ -60,7 +60,7 @@ m1 :: Curs () ByteString
 m1 = proc () -> do
     rec 
         is <- delay "string strung" -< fs
-        os <- signaler 3 2 -< is
+        os <- window 3 2 -< is
         ev <- noLonger ((> 0) . BS.length) -< os
         fs <- until -< (os, ev)
     returnA -< os
