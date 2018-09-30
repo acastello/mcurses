@@ -1,4 +1,8 @@
-{-# LANGUAGE Arrows, GeneralizedNewtypeDeriving, GADTs, RankNTypes, ImpredicativeTypes #-}
+{-# LANGUAGE Arrows                       #-}
+{-# Language GeneralizedNewtypeDeriving   #-}
+{-# Language GADTs                        #-}
+{-# Language RankNTypes                   #-}
+{-# Language ImpredicativeTypes           #-}
 
 module UI.FRP.MCurses where
 
@@ -17,8 +21,6 @@ import Data.Unique
 
 import Prelude hiding (until)
 
--- import qualified UI.MCurses as C
-
 import System.IO
 import System.Random
 
@@ -33,44 +35,72 @@ type MCArrow m = Kleisli (MC m)
 
 type IOMC = MC IO
 
-newtype Signal val = Signal { unSignal :: SignalSource val }
+data Signal val = Signal (Wire val) (IOMC ())
 
-type SignalSource val = IOMC (Maybe (SignalTup val)) 
-type SignalTup val = (SignalCell val, Signal val)
-data SignalCell val = ConstCell val | InitCell Unique (IOMC ())
+newtype Wire val = Wire (IOMC (val, Maybe (Wire val)))
 
--- window :: Int -> Curs IO (Signal ByteString) (Signal ByteString)
--- window n = (\s -> consum s =<< iniW) ^>> act 
---     where 
---     iniW = do 
---         y <- liftIO (randomRIO (0.2,0.8))
---         x <- liftIO (randomRIO (0.2,0.8))
---         w <- newWindow (Height/5) (Width/5) 
---                        (Absolute y * Height) (Absolute x * Width)
---         drawBorder w
---         render
---         return w
---     consum sig win = mapSignalWithInit (\str -> return (rend win str, 
---                                                         tran win str)) sig
---     rend win str = do 
---         erase win
---         drawBorder win
---         moveCursor win 1 1
---         drawByteString win str
---         render
---         liftIO $ threadDelay (n * 100000)
---     tran _ str = do 
---         return (BS.drop 1 str)
--- 
--- m1 :: Curs IO () [ByteString]
--- m1 = proc () -> do
---     rec os <- signaler 4 -< pure "string" <> is
---         let is = mapMSignal (\x -> liftIO (randomRIO ('A','z')) >>= \c -> return (x <> BS.singleton c)) os
---     act -< runSig (os `until` ((== 0) . BS.length))
+scan :: val -> Signal val -> Signal val
+scan x (Signal wire fini) = Signal (Wire $ return (x, Just wire)) fini
 
--- runCurs :: (MonadIO m, MonadMask m) => Curs m a b -> a -> m b
--- runCurs (Curs op) i = runMC $ do
---     runKleisli (runReader op) (i, foreverSignal waitInput)
+runSignal :: Signal val -> IOMC [val]
+runSignal (Signal wire fini) = do xs <- runWire wire
+                                  fini
+                                  return xs
+
+runWire :: Wire val -> IOMC [val]
+runWire (Wire op) = do (x, mwir) <- op
+                       liftM (x:) $ case mwir of
+                           Nothing -> return []
+                           Just wir -> runWire wir
+
+mapSignalWithInit :: (a -> IOMC b) -> IOMC () -> Signal a -> Signal b
+mapSignalWithInit f fini' sig = 
+    let Signal wire' fini = mapSignal f sig
+    in Signal wire' (fini >> fini')
+
+mapSignal :: (a -> IOMC b) -> Signal a -> Signal b
+mapSignal f (Signal wire fini) = Signal (mapWire wire) fini
+    where
+    mapWire (Wire op) = Wire $ do 
+        (x, mwir) <- op
+        y <- f x
+        case mwir of
+            Nothing -> return (y, Nothing)
+            Just wire' -> return (y, Just (mapWire wire'))
+
+window :: Int -> Curs IO (Signal ByteString) (Signal ByteString)
+window n = (\s -> consum s `liftM` iniW) ^>> act 
+    where 
+    iniW = do 
+        y <- liftIO (randomRIO (0.2,0.8)) :: IOMC Double
+        x <- liftIO (randomRIO (0.2,0.8)) :: IOMC Double
+        w <- newWindow (Height/5) (Width/5) 
+                       (Constant y * Height) (Constant x * Width)
+        drawBorder w
+        render
+        return w
+    consum sig win = mapSignalWithInit (repl win) 
+                           (drawByteString stdWindow "!!!!!!!!!") sig
+    repl win str = rend win str >> tran win str
+    rend win str = do 
+        erase win
+        drawBorder win
+        moveCursor win 1 1
+        drawByteString win str
+        render
+        liftIO $ threadDelay (n * 100000)
+    tran _ str = do 
+        return (BS.drop 1 str)
+
+m1 :: Curs IO () (Signal ByteString)
+m1 = proc () -> do
+    rec let is = scan "string strung" os
+        os <- window 5 -< is
+    returnA -< os
+
+runCurs :: Curs IO a (Signal b) -> a -> IO [b]
+runCurs (Curs op) i = runMC $ do
+    runSignal =<< runKleisli (runReader op) (i, undefined)
 
 act :: Monad m => Curs m (MC m output) output
 act = Curs $ (A.lift) (Kleisli id)
