@@ -25,5 +25,7 @@ import System.Random
 import UI.MCurses hiding (io)
 
 type IOMC = MC IO
+type CSF = MSF IOMC
 
-window :: MSF 
+window :: CSF ByteString ByteString
+window = undefined
