@@ -224,7 +224,7 @@ newRegion parent hd wd yd xd = do
     let rdims = (hd, wd, yd, xd)
         dims @ (h,w,y,x) = f rdims
     swin <- io $ do pwinp <- win_wptr parent
-                    swinp <- c_subwin pwinp h w y x 
+                    swinp <- DCALL(c_subwin pwinp h w y x)
                     return (Window $ Left swinp)
     underWindow_ (pure swin :) parent
     MC $ do ce_statuses %= M.insert swin (WindowStatus rdims dims)
@@ -556,4 +556,17 @@ test1 = do
     waitInput
     win ~> do move 3 5
     render
+    waitInput
+
+testRegion1 :: MC IO Input
+testRegion1 = do
+    win <- newWindow 10 30 2 4
+    drawBorder win
+    sw <- newRegion win 8 28 1 1
+    render
+    moveCursor sw 1 1 
+    drawByteString sw "asdasd"
+    waitInput
+    moveCursor sw 1 1 
+    drawByteString sw "ewqewq"
     waitInput
